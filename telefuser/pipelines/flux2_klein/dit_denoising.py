@@ -18,6 +18,7 @@ from telefuser.platforms import current_platform
 from telefuser.schedulers.flow_match import FlowMatchScheduler
 from telefuser.utils.logging import logger
 from telefuser.utils.profiler import ProfilingContext4Debug
+from telefuser.utils.torch_compile import set_compile_configs
 
 
 def compute_empirical_mu(image_seq_len: int, num_steps: int) -> float:
@@ -78,6 +79,13 @@ class DitDenoisingStage(BaseStage):
         self.model_names = ["transformer"]
         self.scheduler = scheduler
         self.batch_cfg = False
+
+        # Handle torch.compile - only compile in __init__ if single GPU mode
+        parallel_cfg = model_runtime_config.parallel_config
+        if model_runtime_config.compile and parallel_cfg.world_size == 1:
+            set_compile_configs(descent_tuning=True, compute_comm_overlap=False)
+            logger.info("enable torch.compile for Flux2DiT (single GPU mode)")
+            self.transformer.compile()
 
     @staticmethod
     def _prepare_latent_ids(latents: torch.Tensor) -> torch.Tensor:
@@ -312,3 +320,9 @@ class DitDenoisingStage(BaseStage):
             if self.model_runtime_config.offload_config.offload_type != WeightOffloadType.NO_CPU_OFFLOAD:
                 self.transformer.cpu()
                 current_platform.empty_cache()
+
+        # Handle torch.compile after parallel setup
+        if self.model_runtime_config.compile and parallel_cfg.world_size > 1:
+            set_compile_configs(descent_tuning=True, compute_comm_overlap=True)
+            logger.info("enable torch.compile for Flux2DiT (parallel mode)")
+            self.transformer.compile()

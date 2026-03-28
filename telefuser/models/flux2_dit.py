@@ -869,25 +869,22 @@ class Flux2DiT(BaseModel):
         )
 
         # 5. Double-stream blocks (use concat_rotary_emb for text + image tokens)
-        for block in self.transformer_blocks:
-            encoder_hidden_states, hidden_states = block(
-                hidden_states=hidden_states,
-                encoder_hidden_states=encoder_hidden_states,
-                temb_mod_img=double_stream_mod_img,
-                temb_mod_txt=double_stream_mod_txt,
-                image_rotary_emb=concat_rotary_emb,
-            )
+        encoder_hidden_states, hidden_states = self.forward_double_blocks(
+            hidden_states=hidden_states,
+            encoder_hidden_states=encoder_hidden_states,
+            temb_mod_img=double_stream_mod_img,
+            temb_mod_txt=double_stream_mod_txt,
+            image_rotary_emb=concat_rotary_emb,
+        )
 
         # 6. Single-stream blocks (concatenated)
         hidden_states = torch.cat([encoder_hidden_states, hidden_states], dim=1)
 
-        for block in self.single_transformer_blocks:
-            hidden_states = block(
-                hidden_states=hidden_states,
-                encoder_hidden_states=None,
-                temb_mod=single_stream_mod,
-                image_rotary_emb=concat_rotary_emb,
-            )
+        hidden_states = self.forward_single_blocks(
+            hidden_states=hidden_states,
+            temb_mod=single_stream_mod,
+            image_rotary_emb=concat_rotary_emb,
+        )
 
         # 7. Split back
         text_seq_len = encoder_hidden_states.shape[1]
@@ -904,6 +901,67 @@ class Flux2DiT(BaseModel):
             return Flux2DiTOutput(sample=output)
 
         return (output,)
+
+    def forward_double_blocks(
+        self,
+        hidden_states: torch.Tensor,
+        encoder_hidden_states: torch.Tensor,
+        temb_mod_img: torch.Tensor,
+        temb_mod_txt: torch.Tensor,
+        image_rotary_emb: tuple[torch.Tensor, torch.Tensor],
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Forward pass through double-stream transformer blocks.
+
+        This method is separated for torch.compile optimization.
+        Compiling only the blocks avoids graph breaks from embedding operations.
+
+        Args:
+            hidden_states: Image tokens of shape (B, seq_len, inner_dim).
+            encoder_hidden_states: Text tokens of shape (B, text_seq_len, inner_dim).
+            temb_mod_img: Modulation for image stream.
+            temb_mod_txt: Modulation for text stream.
+            image_rotary_emb: Rotary embeddings tuple (cos, sin).
+
+        Returns:
+            Tuple of (encoder_hidden_states, hidden_states) after block processing.
+        """
+        for block in self.transformer_blocks:
+            encoder_hidden_states, hidden_states = block(
+                hidden_states=hidden_states,
+                encoder_hidden_states=encoder_hidden_states,
+                temb_mod_img=temb_mod_img,
+                temb_mod_txt=temb_mod_txt,
+                image_rotary_emb=image_rotary_emb,
+            )
+        return encoder_hidden_states, hidden_states
+
+    def forward_single_blocks(
+        self,
+        hidden_states: torch.Tensor,
+        temb_mod: torch.Tensor,
+        image_rotary_emb: tuple[torch.Tensor, torch.Tensor],
+    ) -> torch.Tensor:
+        """Forward pass through single-stream transformer blocks.
+
+        This method is separated for torch.compile optimization.
+        Compiling only the blocks avoids graph breaks from embedding operations.
+
+        Args:
+            hidden_states: Concatenated tokens of shape (B, text_seq_len + img_seq_len, inner_dim).
+            temb_mod: Modulation for single-stream blocks.
+            image_rotary_emb: Rotary embeddings tuple (cos, sin).
+
+        Returns:
+            Hidden states after single-stream block processing.
+        """
+        for block in self.single_transformer_blocks:
+            hidden_states = block(
+                hidden_states=hidden_states,
+                encoder_hidden_states=None,
+                temb_mod=temb_mod,
+                image_rotary_emb=image_rotary_emb,
+            )
+        return hidden_states
 
     def get_fsdp_module_names(self) -> list[str]:
         """Get module names for FSDP sharding."""
@@ -944,6 +1002,56 @@ class Flux2DiT(BaseModel):
             pin_cpu_memory=offload_config.pin_cpu_memory,
         )
         self.async_offload_flag = True
+
+    def compile(self, mode: str = "blocks", **kwargs) -> None:
+        """Compile model for better performance with torch.compile.
+
+        Args:
+            mode: Compilation mode:
+                - "blocks": Compile forward_double_blocks and forward_single_blocks (default, most effective)
+                - "double_blocks": Compile only forward_double_blocks
+                - "single_blocks": Compile only forward_single_blocks
+                - "full": Compile entire forward method
+            **kwargs: Arguments passed to torch.compile()
+        """
+        # Import mark_static from torch._dynamo
+        try:
+            from torch._dynamo import mark_static
+
+            # Mark module classes as static (instance attributes won't change after compile)
+            mark_static(Flux2DiT)
+            mark_static(Flux2TransformerBlock)
+            mark_static(Flux2SingleTransformerBlock)
+            mark_static(Flux2Attention)
+            mark_static(Flux2ParallelSelfAttention)
+            mark_static(Flux2FeedForward)
+            mark_static(AdaLayerNormContinuous)
+        except ImportError:
+            logger.warning("torch._dynamo.mark_static not available, skipping static marking")
+
+        # Compile based on mode
+        if mode == "blocks":
+            # Compile both block forward methods
+            original_double_fn = self.forward_double_blocks
+            original_single_fn = self.forward_single_blocks
+            self.forward_double_blocks = torch.compile(original_double_fn, **kwargs)
+            self.forward_single_blocks = torch.compile(original_single_fn, **kwargs)
+            logger.info(f"Flux2DiT compiled: mode={mode}")
+        elif mode == "double_blocks":
+            original_fn = self.forward_double_blocks
+            self.forward_double_blocks = torch.compile(original_fn, **kwargs)
+            logger.info(f"Flux2DiT compiled: mode={mode}")
+        elif mode == "single_blocks":
+            original_fn = self.forward_single_blocks
+            self.forward_single_blocks = torch.compile(original_fn, **kwargs)
+            logger.info(f"Flux2DiT compiled: mode={mode}")
+        elif mode == "full":
+            # Store original forward for fallback
+            self._original_forward = self.forward
+            self.forward = torch.compile(self.forward, **kwargs)
+            logger.info(f"Flux2DiT compiled: mode={mode}")
+        else:
+            raise ValueError(f"Unknown compile mode: {mode}")
 
     @staticmethod
     def state_dict_converter():
