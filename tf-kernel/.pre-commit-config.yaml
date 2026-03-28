@@ -1,0 +1,47 @@
+default_stages: [pre-commit, pre-push, manual]
+exclude: ^(3rd/|build/|dist/)
+
+repos:
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v5.0.0
+    hooks:
+      - id: check-symlinks
+      - id: destroyed-symlinks
+      - id: trailing-whitespace
+      - id: end-of-file-fixer
+      - id: check-yaml
+        args: [--allow-multiple-documents]
+      - id: check-toml
+      - id: check-ast
+      - id: check-added-large-files
+      - id: check-merge-conflict
+      - id: check-shebang-scripts-are-executable
+      - id: detect-private-key
+      - id: debug-statements
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.11.7
+    hooks:
+      - id: ruff
+        args:
+          - --select=F821
+          # - --select=F401  # Disabled: unused import check
+          - --fix
+        files: ^(tf_kernel/|tests/|benchmark/)
+  # Note: black-jupyter is disabled
+  # - repo: https://github.com/psf/black
+  #   rev: 24.10.0
+  #   hooks:
+  #     - id: black-jupyter
+  #       files: ^(tf_kernel/|tests/|benchmark/)
+  # Note: codespell is disabled
+  # - repo: https://github.com/codespell-project/codespell
+  #   rev: v2.4.1
+  #   hooks:
+  #     - id: codespell
+  #       args: ['--config', '.codespellrc']
+  - repo: https://github.com/pre-commit/mirrors-clang-format
+    rev: v18.1.8
+    hooks:
+    - id: clang-format
+      types_or: [c++, cuda]
+      args: [--style=file, --verbose]

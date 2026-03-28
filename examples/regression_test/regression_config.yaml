@@ -1,0 +1,202 @@
+# TeleFuser Pipeline Regression Test Configuration
+# =================================================
+#
+# Each pipeline entry explicitly lists the script to run and its parameters.
+# No auto-discovery -- this file IS the test registry.
+#
+# Usage:
+#   python examples/regression_test/run_regression.py --list
+#   python examples/regression_test/run_regression.py --pipeline wan21_1_3b_t2v
+#   python examples/regression_test/run_regression.py --all
+#   python examples/regression_test/run_regression.py --all --update-baseline
+
+defaults:
+  seed: 42
+  timeout_seconds: 1800
+  psnr_min: 25.0
+  ssim_min: 0.85
+  pixel_diff_max: 0.02
+
+output_root: examples/regression_test/regression_outputs
+
+pipelines:
+
+  # ============================================================
+  # wan_video — Text to Video
+  # ============================================================
+
+  wan21_1_3b_t2v:
+    script: wan_video/wan21_1_3b_text_to_video_h100.py
+    gpu_count: 1
+    output_type: video
+    model_root: /nvfile-heatstorage/model_zoo/modelscope/Wan2.1-T2V-1.3B
+    ppl_config_overrides:
+      vfi_model_path: /nvfile-heatstorage/model_zoo/modelscope/Wan2.1-T2V-1.3B/flownet.pkl
+
+  wan21_1_3b_t2v_radial:
+    script: wan_video/wan21_1_3b_text_to_video_radial.py
+    gpu_count: 1
+    output_type: video
+    model_root: /nvfile-heatstorage/model_zoo/modelscope/Wan2.1-T2V-1.3B
+
+  # ============================================================
+  # wan_video — Image to Video
+  # ============================================================
+
+  wan21_14b_i2v:
+    script: wan_video/wan21_14b_image_to_video_h100.py
+    gpu_count: 1
+    output_type: video
+    input_image_path: examples/data/101235-video-720_0.png
+    ppl_config_overrides:
+      attn_impl: FLASH_ATTN_2
+
+  wan21_14b_i2v_lora:
+    script: wan_video/wan21_14b_image_to_video_lora_h100.py
+    gpu_count: 1
+    output_type: video
+    input_image_path: examples/data/101235-video-720_0.png
+    ppl_config_overrides:
+      attn_impl: FLASH_ATTN_2
+
+  wan22_14b_i2v:
+    script: wan_video/wan22_14b_image_to_video_h100.py
+    gpu_count: 1
+    output_type: video
+    input_image_path: examples/data/101235-video-720_0.png
+    ppl_config_overrides:
+      attn_impl: FLASH_ATTN_2
+
+  wan22_14b_i2v_distill:
+    script: wan_video/wan22_14b_image_to_video_distill_h100.py
+    gpu_count: 1
+    output_type: video
+    input_image_path: examples/data/101235-video-720_0.png
+    ppl_config_overrides:
+      attn_impl: FLASH_ATTN_2
+
+  wan22_14b_i2v_lora:
+    script: wan_video/wan22_14b_image_to_video_lora_h100.py
+    gpu_count: 1
+    output_type: video
+    input_image_path: examples/data/101235-video-720_0.png
+    ppl_config_overrides:
+      attn_impl: FLASH_ATTN_2
+
+  wan22_14b_i2v_mix:
+    script: wan_video/wan22_14b_image_to_video_mix_h100.py
+    gpu_count: 1
+    output_type: video
+    input_image_path: examples/data/101235-video-720_0.png
+    ppl_config_overrides:
+      attn_impl: FLASH_ATTN_2
+
+  # ============================================================
+  # hunyuan_video
+  # ============================================================
+
+  hunyuan_t2v:
+    script: hunyuan_video/hunyuan_video_t2v.py
+    gpu_count: 1
+    output_type: video
+    model_root: /nvfile-heatstorage/model_zoo/HunyuanVideo-1.5
+    timeout_seconds: 3600
+    max_gpu_memory_mb: 49152
+
+  hunyuan_i2v:
+    script: hunyuan_video/hunyuan_video_i2v.py
+    gpu_count: 1
+    output_type: video
+    model_root: /nvfile-heatstorage/model_zoo/HunyuanVideo-1.5
+    input_image_path: examples/data/101235-video-720_0.png
+    timeout_seconds: 3600
+    max_gpu_memory_mb: 55296
+
+  # ============================================================
+  # qwen_image
+  # ============================================================
+
+  qwen_t2i:
+    script: qwen_image/qwen_image_t2i_h100.py
+    gpu_count: 1
+    output_type: image
+
+  qwen_t2i_lora:
+    script: qwen_image/qwen_image_t2i_lora_h100.py
+    gpu_count: 1
+    output_type: image
+    ppl_config_overrides:
+      attn_impl: FLASH_ATTN_2
+
+  qwen_image_edit:
+    script: qwen_image/qwen_image_edit_plus_h100.py
+    gpu_count: 1
+    output_type: image
+    input_image_path: examples/data/edit2511input.png
+
+  # ============================================================
+  # z_image
+  # ============================================================
+
+  z_image_turbo_t2i:
+    script: z_image/z_image_turbo_t2i_h100.py
+    gpu_count: 1
+    output_type: image
+
+  # ============================================================
+  # flashvsr
+  # ============================================================
+
+  flashvsr_stream:
+    script: flashvsr/flashvsr_stream.py
+    gpu_count: 1
+    output_type: video
+    input_video_path: examples/data/dag.mp4
+    max_gpu_memory_mb: 26624
+
+  # ============================================================
+  # longcat_video
+  # ============================================================
+
+  longcat_t2v:
+    script: longcat_video/longcat_text_to_video.py
+    gpu_count: 1
+    output_type: video
+    timeout_seconds: 3600
+    ppl_config_overrides:
+      attn_impl: FLASH_ATTN_2
+
+  longcat_i2v:
+    script: longcat_video/longcat_image_to_video.py
+    gpu_count: 1
+    output_type: video
+    input_image_path: examples/data/101235-video-720_0.png
+    timeout_seconds: 3600
+    ppl_config_overrides:
+      attn_impl: FLASH_ATTN_2
+
+  longcat_video_continue:
+    script: longcat_video/longcat_video_continue.py
+    gpu_count: 1
+    output_type: video
+    input_video_path: examples/data/dag.mp4
+    timeout_seconds: 3600
+    ppl_config_overrides:
+      attn_impl: FLASH_ATTN_2
+
+  longcat_video_unify:
+    script: longcat_video/longcat_video_unify.py
+    gpu_count: 1
+    output_type: video
+    input_image_path: examples/data/101235-video-720_0.png
+    timeout_seconds: 3600
+    ppl_config_overrides:
+      attn_impl: FLASH_ATTN_2
+
+  longcat_t2v_refine:
+    script: longcat_video/longcat_text_to_video_refine.py
+    gpu_count: 1
+    output_type: video
+    timeout_seconds: 7200
+    ppl_config_overrides:
+      attn_impl: FLASH_ATTN_2

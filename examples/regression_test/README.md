@@ -1,0 +1,108 @@
+# TeleFuser Pipeline Regression Test
+
+Runs configured pipelines in isolated subprocesses, compares outputs against
+baselines (PSNR/SSIM for video, pixel diff for image), and prints a results table.
+
+## Quick Start
+
+```bash
+# List configured pipelines
+python examples/regression_test/run_regression.py --list
+
+# Run a specific pipeline
+python examples/regression_test/run_regression.py --pipeline wan21_1_3b_t2v
+
+# Run all enabled pipelines
+python examples/regression_test/run_regression.py --all
+
+# Update baselines after successful runs
+python examples/regression_test/run_regression.py --all --update-baseline
+```
+
+## CLI Reference
+
+```
+python examples/regression_test/run_regression.py [OPTIONS]
+
+Options:
+  --list                 List configured pipelines and exit
+  --pipeline NAME        Run a specific pipeline by name
+  --all                  Run all enabled pipelines
+  --update-baseline      Update baseline outputs after successful runs
+  --config PATH          Path to config YAML (default: regression_config.yaml)
+```
+
+## File Structure
+
+```
+examples/regression_test/
+  run_regression.py        # Single script: config, execution, metrics, reporting
+  regression_config.yaml   # Pipeline registry + configuration
+  README.md                # This file
+```
+
+## Configuration
+
+Edit `regression_config.yaml` to manage pipelines:
+
+```yaml
+defaults:
+  seed: 42
+  timeout_seconds: 1800
+  psnr_min: 25.0
+  ssim_min: 0.85
+  pixel_diff_max: 0.02
+
+output_root: examples/regression_test/regression_outputs
+
+pipelines:
+  wan21_1_3b_t2v:
+    script: wan_video/wan21_1_3b_text_to_video_h100.py
+    gpu_count: 1
+    output_type: video
+    model_root: /path/to/model
+    ppl_config_overrides:
+      attn_impl: FLASH_ATTN_2
+```
+
+### Pipeline Config Fields
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| script | str | required | Path to example script (relative to `examples/`) |
+| enabled | bool | true | Skip if false |
+| gpu_count | int | 1 | GPUs to allocate |
+| output_type | str | video | `video` or `image` |
+| timeout_seconds | int | 1800 | Max execution time |
+| seed | int | 42 | Random seed |
+| model_root | str\|null | null | Override model directory |
+| prompt | str\|null | null | Override generation prompt |
+| input_image_path | str\|null | null | Input image for I2V / edit pipelines |
+| input_video_path | str\|null | null | Input video for VSR / continue pipelines |
+| ppl_config_overrides | dict | {} | Override PPL_CONFIG keys |
+| psnr_min | float | 25.0 | Video: minimum PSNR vs baseline |
+| ssim_min | float | 0.85 | Video: minimum SSIM vs baseline |
+| pixel_diff_max | float | 0.02 | Image: max mean pixel difference |
+| max_elapsed_seconds | float\|null | null | Performance threshold |
+| max_gpu_memory_mb | float\|null | null | GPU memory threshold |
+
+## Output
+
+```
+examples/regression_test/regression_outputs/
+  regression_report.json            # JSON report with metrics + environment
+  <pipeline_slug>/
+    latest.log                      # Subprocess stdout/stderr
+    baseline/output.mp4             # Baseline output
+    <timestamp>/output.mp4          # Timestamped run output
+```
+
+## Features
+
+- **Explicit registry**: `regression_config.yaml` lists all pipelines — no auto-discovery
+- **Subprocess isolation**: Each pipeline runs in its own process with pinned `CUDA_VISIBLE_DEVICES`
+- **Baseline management**: First run auto-saves as baseline; `--update-baseline` refreshes
+- **Regression metrics**: PSNR + SSIM for video, pixel diff for image
+- **GPU memory tracking**: Peak VRAM usage per pipeline
+- **Output validation**: NaN/Inf detection
+- **Error classification**: MODEL_LOAD_ERROR, INFERENCE_ERROR, OUTPUT_ERROR, OOM_ERROR

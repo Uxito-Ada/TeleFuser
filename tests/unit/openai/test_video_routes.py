@@ -1,0 +1,107 @@
+"""
+Integration tests for OpenAI video routes.
+
+Uses real FastAPI TestClient with mocked services.
+"""
+
+from unittest.mock import MagicMock
+
+import pytest
+from fastapi import FastAPI
+from fastapi.testclient import TestClient
+
+from telefuser.service.api.openai.video_routes import create_router
+from telefuser.service.core.task_manager import TaskStatus
+
+
+@pytest.fixture
+def client(tmp_path):
+    """Create test client with mocked services."""
+    # Create mock message with proper string attributes
+    mock_message = MagicMock()
+    mock_message.prompt = "test prompt"
+    mock_message.resolution = "720p"
+    mock_message.target_video_length = 5
+    mock_message.model = "wan-video"
+
+    task_manager = MagicMock()
+    task_manager.create_task = MagicMock(return_value="vid_123")
+    task_manager.get_task_status = MagicMock(
+        return_value={
+            "task_id": "vid_123",
+            "status": TaskStatus.COMPLETED.value,
+            "output_path": str(tmp_path / "video.mp4"),
+        }
+    )
+    task_manager.get_task = MagicMock(
+        return_value=MagicMock(
+            task_id="vid_123",
+            output_path=str(tmp_path / "video.mp4"),
+            status=TaskStatus.COMPLETED,
+            message=mock_message,
+        )
+    )
+    task_manager.get_all_tasks = MagicMock(return_value={})
+
+    (tmp_path / "video.mp4").write_bytes(b"fake_video")
+
+    server = MagicMock()
+    server.task_manager = task_manager
+    server.file_service = MagicMock()
+    server.file_service.output_video_dir = tmp_path
+    server.file_service.input_video_dir = tmp_path / "input"
+    server.file_service.input_video_dir.mkdir(exist_ok=True)
+
+    app = FastAPI()
+    app.include_router(create_router(server))
+
+    with TestClient(app) as client:
+        yield client
+
+
+class TestVideoCreate:
+    """Tests for POST /v1/videos."""
+
+    def test_create_video_success(self, client):
+        """Create video returns queued status."""
+        response = client.post(
+            "/v1/videos",
+            json={
+                "prompt": "a cat playing",
+                "seconds": 5,
+            },
+        )
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["id"] == "vid_123"
+        assert data["status"] == "queued"
+
+    def test_create_video_validation_error(self, client):
+        """Missing prompt returns 422."""
+        response = client.post("/v1/videos", json={"seconds": 5})
+
+        assert response.status_code == 422
+
+
+class TestVideoRetrieve:
+    """Tests for GET /v1/videos/{id}."""
+
+    def test_get_video_success(self, client):
+        """Get existing video status."""
+        response = client.get("/v1/videos/vid_123")
+
+        assert response.status_code == 200
+        data = response.json()
+        assert data["id"] == "vid_123"
+
+
+class TestVideoContent:
+    """Tests for GET /v1/videos/{id}/content."""
+
+    def test_download_video_success(self, client):
+        """Download completed video."""
+        response = client.get("/v1/videos/vid_123/content")
+
+        assert response.status_code == 200
+        assert response.content == b"fake_video"

@@ -1,0 +1,21 @@
+exclude: ^(tele-fuser)
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.9.4
+    hooks:
+      - id: ruff
+        args: [--fix, --respect-gitignore, --config=pyproject.toml]
+        exclude: ^tools/
+      - id: ruff-format
+        args: [--config=pyproject.toml]
+        exclude: ^tools/
+
+  # Optional: mypy for stricter type checking
+  # Uncomment below to enable mypy (requires `pip install mypy`)
+  # - repo: https://github.com/pre-commit/mirrors-mypy
+  #   rev: v1.15.0
+  #   hooks:
+  #     - id: mypy
+  #       additional_dependencies: [types-requests, types-PyYAML]
+  #       args: [--ignore-missing-imports, --show-error-codes]
+  #       exclude: ^(tests/|examples/|tools/)

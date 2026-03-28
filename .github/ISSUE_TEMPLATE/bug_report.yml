@@ -1,0 +1,73 @@
+name: Bug Report
+description: Create a report to help us improve tf-kernel
+title: "[BUG] "
+labels: ["bug", "triage"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to fill out this bug report!
+
+  - type: textarea
+    id: description
+    attributes:
+      label: Describe the bug
+      description: A clear and concise description of what the bug is.
+      placeholder: |
+        When I run the following code, I get an error...
+    validations:
+      required: true
+
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: To Reproduce
+      description: Steps to reproduce the behavior
+      placeholder: |
+        1. Install tf-kernel with 'pip install tf-kernel'
+        2. Run the following code:
+        ```python
+        import tf_kernel
+        # your code here
+        ```
+        3. See error
+    validations:
+      required: true
+
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+      description: A clear and concise description of what you expected to happen.
+      placeholder: |
+        The kernel should run without errors and return...
+    validations:
+      required: true
+
+  - type: textarea
+    id: environment
+    attributes:
+      label: Environment
+      description: Please provide details about your environment
+      value: |
+        - OS: [e.g. Ubuntu 22.04]
+        - Python version: [e.g. 3.10.12]
+        - PyTorch version: [e.g. 2.9.1]
+        - CUDA version: [e.g. 12.4]
+        - GPU: [e.g. NVIDIA A100, RTX 4090]
+        - tf-kernel version: [e.g. 0.1.0]
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Error logs
+      description: If applicable, add error logs or stack traces
+      render: shell
+
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Add any other context about the problem here

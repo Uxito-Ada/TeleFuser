@@ -1,0 +1,202 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel", "setuptools-scm>=6.2"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "telefuser"
+dynamic = ["version"] 
+description = "A framework for efficient model inference with multimodal generation models"
+readme = "README.md"
+requires-python = ">=3.10,<3.14"
+license = {text = "Apache-2.0"}
+authors = [
+    {name = "TeleAI Team"}
+]
+keywords = ["multimodal", "diffusion", "transformer", "inference", "serving"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+]
+
+
+dependencies = [
+    # Core runtime dependencies (required for actual usage)
+    "diffusers>=0.36.0",
+    "gradio==5.50",
+    "tqdm>=4.66.0",
+    "imageio[ffmpeg]>=2.37.2",
+    "transformers==4.57.3",
+    "safetensors",
+    "einops",
+    "loguru",
+    "openai",
+    "fastapi",
+    "click", 
+    "ftfy",
+    "ray",
+    "pydantic>=2.0.0",
+    "pydantic-settings>=2.0.0"
+]
+
+[project.optional-dependencies]
+
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.21.0",
+    "pytest-cov>=4.0.0",
+    "pre-commit==4.0.1",
+    "psutil>=7.2.0",
+    "opencv-python>=4.12.0.88",
+    "uv"
+]
+
+
+docs = [
+    "mkdocs>=1.5.0",
+    "mkdocs-api-autonav",
+    "mkdocs-material",
+    "mkdocstrings-python",
+    "mkdocs-gen-files",
+    "mkdocs-awesome-nav",
+    "mkdocs-glightbox",
+    "mkdocs-git-revision-date-localized-plugin",
+    "mkdocs-minify-plugin",
+    "regex",
+    "ruff==0.9.4",
+]
+
+
+[project.urls]
+Homepage = "https://www.srdcloud.cn/code/49596/repoView/372413/codeFile/tree"
+Repository = "https://www.srdcloud.cn/code/49596/repoView/372413/codeFile/tree"
+
+[project.scripts]
+telefuser = "telefuser.entrypoints.cli.main:main"
+
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["telefuser*"]
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+addopts = [
+    "-v",
+    "--strict-markers",
+    "--tb=short",
+    "-ra",
+]
+markers = [
+    "slow: marks tests as slow",
+    "gpu: marks tests that require GPU",
+    "multi_gpu: marks tests that require multiple GPUs",
+    "distributed: marks tests that require distributed setup",
+    "quant: marks tests that require quantization support",
+    "filesystem: marks tests that require filesystem access (skipped in CI)",
+    "integration: marks tests that start a real server and make HTTP requests",
+]
+
+[tool.coverage.run]
+source = ["telefuser"]
+omit = [
+    "*/tests/*",
+    "*/tf-kernel/*",
+    "*/examples/*",
+    # Modules that require GPU/models - temporarily excluded from coverage
+    "*/models/*",
+    "*/pipelines/*",
+    "*/orchestrator/*",
+    "*/kernel/*",
+    "*/service/*.py",
+    "*/worker/*",
+    "*/utils/hf_utils.py",
+    "*/utils/lora_loader.py",
+    "*/utils/profiler.py",
+    "*/utils/system.py",
+    "*/utils/torch_compile.py",
+    "*/utils/video.py",
+    "*/utils/func.py",
+    "*/distributed/a2a.py",
+    "*/distributed/fsdp.py",
+    "*/distributed/parallel_shard.py",
+    "*/distributed/tp_parallelize.py",
+    "*/schedulers/lcm.py",
+    "*/schedulers/unipc.py",
+    "*/feature_cache/ada_taylor_cache/params/*",
+]
+branch = true
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise AssertionError",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+    "@pytest.mark.gpu",
+]
+# fail_under = 40  # Temporarily disabled until more tests are added
+
+[tool.ruff]
+line-length = 120
+exclude = [
+    ".eggs",
+    ".git",
+    ".hg",
+    ".mypy_cache",
+    ".tox",
+    ".venv",
+    "build",
+    "dist",
+    "tf-kernel",
+    "benchmarks"
+]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "ANN", # flake8-annotations: type annotation checks
+]
+ignore = [
+    "E203",   # whitespace before ':' (conflicts with black)
+    "F401",
+    "E402",
+    "E712",
+    # Type annotation rules - adjust based on project needs
+    "ANN401", # Allow dynamically typed expressions (Any) for flexibility
+    # Return type annotations - disabled to reduce annotation burden
+    "ANN001", # Missing return type annotation for public function
+    "ANN201", # Missing return type annotation for public function
+    "ANN202", # Missing return type annotation for private method
+    "ANN204", # Missing return type annotation for special method (__init__)
+    "ANN205", # Missing return type annotation for static method
+    "ANN206", # Missing return type annotation for class method
+    # Variable argument annotations - disabled for flexibility
+    "ANN002", # Missing type annotation for `*args`
+    "ANN003", # Missing type annotation for `**kwargs`
+]
+
+[tool.ruff.lint.per-file-ignores]
+"examples/**" = ["E501", "ANN"]  # Allow long lines and missing annotations in examples
+"tests/**" = ["E501", "ANN"]     # Allow long lines and missing annotations in tests
+"telefuser/kernel/triton/**" = ["ANN"]  # Allow missing annotations in triton kernels
+[tool.ruff.lint.isort]
+known-first-party = ["lightx2v"]
+case-sensitive = true
+[tool.setuptools_scm]
+write_to = "telefuser/_version.py"

@@ -1,0 +1,147 @@
+"""Triton kernels for FP8 per-token quantization/dequantization."""
+
+from __future__ import annotations
+
+import torch
+import triton
+import triton.language as tl
+
+__all__ = ["per_token_quant_fp8", "per_token_dequant_fp8"]
+
+
+@triton.jit
+def _per_token_quant_8bit(
+    y_ptr: tl.tensor,
+    x_ptr: tl.tensor,
+    H: int,
+    eps: float,
+    bit8_min: float,
+    bit8_max: float,
+    BLOCK: tl.constexpr,
+):
+    """Per-token FP8 quantization kernel.
+
+    Computes scale = max(abs(x)) / 127.0, quantizes to [-127, 127].
+    Stores quantized values with trailing 2 bytes for scale.
+    """
+    s_id = tl.program_id(0).to(tl.int64)
+    y_ptr += s_id * (H + 2)  # +2 for scale storage
+    y_s_ptr = y_ptr + H
+    x_ptr += s_id * H
+
+    # Compute per-token absmax for scaling
+    _absmax = tl.full([BLOCK], value=eps, dtype=tl.float32)
+    for h in range(0, H, BLOCK):
+        cols = h + tl.arange(0, BLOCK).to(tl.int64)
+        mask = cols < H
+        x = tl.load(x_ptr + cols, mask=mask, other=0.0, eviction_policy="evict_last").to(tl.float32)
+        _absmax = tl.maximum(tl.abs(x), _absmax)
+
+    _absmax = tl.max(_absmax)
+    x_s = _absmax / bit8_max
+    x_s_inv = 1.0 / x_s
+    x_s = x_s.to(x_ptr.dtype.element_ty)
+
+    y_s_ptr = y_s_ptr.to(tl.pointer_type(x_ptr.dtype.element_ty, 1))
+    tl.store(y_s_ptr, x_s)
+
+    # Quantize and store
+    for h in range(0, H, BLOCK):
+        cols = h + tl.arange(0, BLOCK).to(tl.int64)
+        mask = cols < H
+        x = tl.load(x_ptr + cols, mask=mask, other=0.0).to(tl.float32)
+        x_q = tl.clamp(x * x_s_inv, bit8_min, bit8_max).to(y_ptr.dtype.element_ty)
+        tl.store(y_ptr + cols, x_q, mask=mask)
+
+
+@triton.jit
+def _per_token_dequant_8bit(
+    y_ptr: tl.tensor,
+    x_ptr: tl.tensor,
+    H: int,
+    BLOCK: tl.constexpr,
+):
+    """Per-token FP8 dequantization kernel.
+
+    Reads scale from trailing 2 bytes, dequantizes values.
+    """
+    s_id = tl.program_id(0).to(tl.int64)
+    y_ptr += s_id * H
+    x_ptr += s_id * (H + 2)  # +2 for scale storage
+
+    x_s_ptr = x_ptr + H
+    x_s_ptr = x_s_ptr.to(tl.pointer_type(y_ptr.dtype.element_ty, 1))
+    x_s = tl.load(x_s_ptr).to(tl.float32)
+
+    for h in range(0, H, BLOCK):
+        cols = h + tl.arange(0, BLOCK).to(tl.int64)
+        mask = cols < H
+        x = tl.load(x_ptr + cols, mask=mask, other=0.0).to(tl.float32)
+        x = x * x_s
+        tl.store(y_ptr + cols, x, mask=mask)
+
+
+def per_token_quant_fp8(x: torch.Tensor) -> torch.Tensor:
+    """Quantize tensor to FP8 E4M3 with per-token scaling.
+
+    Args:
+        x: Input tensor in bfloat16, shape [..., H].
+
+    Returns:
+        Quantized tensor in float8_e4m3fn, shape [..., H+2].
+        Last 2 bytes store per-token scale factor.
+    """
+    assert x.dtype == torch.bfloat16, f"Expected bfloat16, got {x.dtype}"
+    dtype = torch.float8_e4m3fn
+    finfo = torch.finfo(dtype)
+    *shape, H = x.shape
+    x = x.reshape(-1, H).contiguous()
+    M, N = x.shape
+    y = torch.empty((M, N + 2), dtype=dtype, device=x.device)
+
+    # Auto-tune block size and warps based on head dimension
+    BLOCK = max(min(8192, 65536 // x.element_size(), triton.next_power_of_2(N)), 128)
+    num_warps = min(max(BLOCK // 256, 1), 8)
+
+    with torch.cuda.device(x.device):
+        _per_token_quant_8bit[(M,)](
+            y,
+            x,
+            N,
+            eps=1e-4,
+            bit8_min=finfo.min,
+            bit8_max=finfo.max,
+            BLOCK=BLOCK,
+            num_warps=num_warps,
+        )
+    return y.reshape(*shape, H + 2)
+
+
+def per_token_dequant_fp8(x: torch.Tensor) -> torch.Tensor:
+    """Dequantize FP8 E4M3 tensor with per-token scaling.
+
+    Args:
+        x: Quantized tensor in float8_e4m3fn, shape [..., H+2].
+
+    Returns:
+        Dequantized tensor in bfloat16, shape [..., H].
+    """
+    assert x.dtype == torch.float8_e4m3fn, f"Expected float8_e4m3fn, got {x.dtype}"
+    *shape, H = x.shape
+    x = x.reshape(-1, H).contiguous()
+    M, N = x.shape
+    N -= 2  # Exclude scale bytes
+    y = torch.empty((M, N), dtype=torch.bfloat16, device=x.device)
+
+    BLOCK = max(min(8192, 65536 // x.element_size(), triton.next_power_of_2(N)), 128)
+    num_warps = min(max(BLOCK // 256, 1), 8)
+
+    with torch.cuda.device(x.device):
+        _per_token_dequant_8bit[(M,)](
+            y,
+            x,
+            N,
+            BLOCK=BLOCK,
+            num_warps=num_warps,
+        )
+    return y.reshape(*shape, H - 2)

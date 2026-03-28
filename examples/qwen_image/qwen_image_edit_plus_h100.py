@@ -1,0 +1,110 @@
+import os
+import time
+
+import click
+import torch
+from PIL import Image
+
+from telefuser.core.config import AttentionConfig, AttnImplType
+from telefuser.core.module_manager import ModuleManager
+from telefuser.pipelines.qwen_image import (
+    QwenImageEditPipeline,
+    QwenImageEditPipelineConfig,
+)
+from telefuser.utils.utils import get_example_name
+
+PPL_CONFIG = dict(
+    name="qwen_image_edit_2511_h100",
+    dit_path=[
+        "/nvfile-heatstorage/model_zoo/huggingface/Qwen-Image-Edit-2511/transformer/diffusion_pytorch_model-00001-of-00005.safetensors",
+        "/nvfile-heatstorage/model_zoo/huggingface/Qwen-Image-Edit-2511/transformer/diffusion_pytorch_model-00002-of-00005.safetensors",
+        "/nvfile-heatstorage/model_zoo/huggingface/Qwen-Image-Edit-2511/transformer/diffusion_pytorch_model-00003-of-00005.safetensors",
+        "/nvfile-heatstorage/model_zoo/huggingface/Qwen-Image-Edit-2511/transformer/diffusion_pytorch_model-00004-of-00005.safetensors",
+        "/nvfile-heatstorage/model_zoo/huggingface/Qwen-Image-Edit-2511/transformer/diffusion_pytorch_model-00005-of-00005.safetensors",
+    ],
+    vae_path=[
+        "/nvfile-heatstorage/model_zoo/huggingface/Qwen-Image-Edit-2511/vae/diffusion_pytorch_model.safetensors",
+    ],
+    text_encoder_path=[
+        "/nvfile-heatstorage/model_zoo/huggingface/Qwen-Image-Edit-2511/text_encoder/model-00001-of-00004.safetensors",
+        "/nvfile-heatstorage/model_zoo/huggingface/Qwen-Image-Edit-2511/text_encoder/model-00002-of-00004.safetensors",
+        "/nvfile-heatstorage/model_zoo/huggingface/Qwen-Image-Edit-2511/text_encoder/model-00003-of-00004.safetensors",
+        "/nvfile-heatstorage/model_zoo/huggingface/Qwen-Image-Edit-2511/text_encoder/model-00004-of-00004.safetensors",
+    ],
+    processor_path="/nvfile-heatstorage/model_zoo/huggingface/Qwen-Image-Edit-2511/processor",
+    attn_impl=AttnImplType.TORCH_SDPA,
+    seed=0,
+    sample_solver="euler",
+    model_type="Qwen-Image-Edit-Plus",
+    enable_feature_cache=False,
+    cfg_scale=4.0,
+    num_inference_steps=40,
+)
+
+
+def get_pipeline(parallelism=1):
+    mm = ModuleManager(torch_dtype=torch.bfloat16, device="cpu")
+    mm.load_model(PPL_CONFIG["dit_path"], device="cpu", torch_dtype=torch.bfloat16)
+    mm.load_model(PPL_CONFIG["vae_path"], device="cpu", torch_dtype=torch.bfloat16)
+    mm.load_model(PPL_CONFIG["text_encoder_path"], device="cpu", torch_dtype=torch.bfloat16)
+    mm.load_from_huggingface(PPL_CONFIG["processor_path"], module_name="processor")
+    pipeline = QwenImageEditPipeline(device="cuda", torch_dtype=torch.bfloat16)
+    pipe_config = QwenImageEditPipelineConfig()
+    pipe_config.is_edit_plus = True
+    pipe_config.dit_config.attention_config = AttentionConfig.dense_attention(PPL_CONFIG["attn_impl"])
+    pipe_config.sample_solver = PPL_CONFIG["sample_solver"]
+    if PPL_CONFIG["enable_feature_cache"]:
+        pipe_config.dit_config.feature_cache_config.enabled = True
+        pipe_config.dit_config.feature_cache_config.model_type = PPL_CONFIG["model_type"]
+    if parallelism > 1:
+        pipe_config.dit_config.parallel_config.device_ids = list(range(parallelism))
+        pipe_config.dit_config.parallel_config.sp_ulysses_degree = parallelism
+        pipe_config.enable_denoising_parallel = True
+    pipeline.init(mm, pipe_config)
+    return pipeline
+
+
+def run(
+    pipeline: QwenImageEditPipeline,
+    prompt,
+    image,
+    negative_prompt="",
+    seed=PPL_CONFIG["seed"],
+):
+    image = pipeline(
+        prompt,
+        image=image,
+        negative_prompt=negative_prompt,
+        seed=seed,
+        num_inference_steps=PPL_CONFIG["num_inference_steps"],
+        rand_device="cpu",
+        cfg_scale=PPL_CONFIG["cfg_scale"],
+    )
+    return image
+
+
+@click.command()
+@click.option("--aspect_ratio", "-ar", default="1:1", help="Image ratio such as 1:1, 16:9", type=str)
+@click.option("--gpu_num", default=1, help="Number of GPUs to use", type=int)
+@click.option("--prompt", default=None, help="Custom prompt text")
+@click.option("--image_path", default=None, help="Custom image path")
+@click.option("--output", default=get_example_name(__file__, "png"), help="Output image filename")
+def main(aspect_ratio, gpu_num, prompt, image_path, output):
+    if prompt is None and image_path is None:
+        prompt = "这个女生看着面前的电视屏幕，屏幕上面写着“阿里巴巴”"
+        image_path = f"{os.path.dirname(__file__)}/../data/edit2511input.png"
+    image = Image.open(image_path)
+    pipeline = get_pipeline(gpu_num)
+    # Warm up
+    images = run(pipeline, prompt, [image], aspect_ratio)
+    # Timing run
+    s = time.time()
+    images = run(pipeline, prompt, [image], aspect_ratio)
+    print(f"pipe cost {time.time() - s} s")
+    for i, image in enumerate(images):
+        image.save(output.replace(".png", f"_{i}.png"))
+    del pipeline
+
+
+if __name__ == "__main__":
+    main()

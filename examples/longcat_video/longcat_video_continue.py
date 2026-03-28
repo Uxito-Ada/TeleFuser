@@ -1,0 +1,292 @@
+import gc
+import json
+import os
+import time
+
+import click
+import torch
+from tqdm import tqdm
+from transformers import UMT5EncoderModel
+
+from telefuser.core.config import AttentionConfig, AttnImplType, ModelRuntimeConfig, ParallelConfig, WeightOffloadType
+from telefuser.core.module_manager import ModuleManager
+from telefuser.pipelines.longcat_video import (
+    LongCatVideoPipeline,
+    LongCatVideoPipelineConfig,
+)
+from telefuser.utils.utils import get_example_name
+from telefuser.utils.video import VideoData, save_video
+
+PPL_CONFIG = dict(
+    name="longcat_vc",
+    model_root="/nvfile-heatstorage/model_zoo/modelscope/LongCat-Video",
+    negative_prompt="Bright tones, overexposed, static, blurred details, subtitles, style, works, paintings, images, static, overall gray, worst quality, low quality, JPEG compression residue, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn faces, deformed, disfigured, misshapen limbs, fused fingers, still picture, messy background, three legs, many people in the background, walking backwards",
+    num_inference_steps=50,
+    num_frames=93,
+    cfg_scale=4.0,
+    seed=42,
+    tiled=False,
+    attn_impl=AttnImplType.TORCH_SDPA,
+    base_fps=15,
+    target_fps=24,
+    use_kv_cache=True,
+    tokenizer_path="/nvfile-heatstorage/model_zoo/huggingface/LongCat-Video/tokenizer",
+    text_encoder_path="/nvfile-heatstorage/model_zoo/huggingface/LongCat-Video/text_encoder",
+    dit_path_list=[
+        "/nvfile-heatstorage/model_zoo/modelscope/LongCat-Video/dit/diffusion_pytorch_model-00001-of-00006.safetensors",
+        "/nvfile-heatstorage/model_zoo/modelscope/LongCat-Video/dit/diffusion_pytorch_model-00002-of-00006.safetensors",
+        "/nvfile-heatstorage/model_zoo/modelscope/LongCat-Video/dit/diffusion_pytorch_model-00003-of-00006.safetensors",
+        "/nvfile-heatstorage/model_zoo/modelscope/LongCat-Video/dit/diffusion_pytorch_model-00004-of-00006.safetensors",
+        "/nvfile-heatstorage/model_zoo/modelscope/LongCat-Video/dit/diffusion_pytorch_model-00005-of-00006.safetensors",
+        "/nvfile-heatstorage/model_zoo/modelscope/LongCat-Video/dit/diffusion_pytorch_model-00006-of-00006.safetensors",
+    ],
+    vae_path="/nvfile-heatstorage/model_zoo/modelscope/Wan2___1-T2V-14B/Wan2.1_VAE.pth",
+    vfi_model_path="/nvfile-heatstorage/model_zoo/modelscope/RIFEv4.26_0921/flownet.pkl",
+)
+
+
+def get_pipeline(parallelism=1):
+    """
+    Args:
+        parallelism (int): Number of parallel GPUs for inference: 1, 2, 4 or 8
+    """
+    # Load models
+    module_manager = ModuleManager(device="cpu")
+    module_manager.load_models(
+        [PPL_CONFIG["dit_path_list"], PPL_CONFIG["vae_path"]],
+        torch_dtype=torch.bfloat16,
+    )
+
+    module_manager.load_from_huggingface(
+        PPL_CONFIG["tokenizer_path"],
+        module_source="transformers",
+        module_name="longcat_tokenizer",
+    )
+
+    module_manager.load_from_huggingface(
+        PPL_CONFIG["text_encoder_path"],
+        module_source="transformers",
+        module_name="longcat_text_encoder",
+        module_class=UMT5EncoderModel,
+        torch_dtype=torch.bfloat16,
+    )
+
+    # Load VFI model into the same module_manager
+    module_manager.load_model(
+        PPL_CONFIG["vfi_model_path"],
+        torch_dtype=torch.bfloat16,
+    )
+
+    # Parallel configuration
+    if parallelism == 1:
+        parallel_config = ParallelConfig()
+    elif parallelism == 2:
+        parallel_config = ParallelConfig(device_ids=[0, 1], cfg_degree=2, sp_ulysses_degree=1, timeout=1800)
+    elif parallelism == 4:
+        parallel_config = ParallelConfig(device_ids=[0, 1, 2, 3], cfg_degree=2, sp_ulysses_degree=2, timeout=1800)
+    elif parallelism == 8:
+        parallel_config = ParallelConfig(device_ids=list(range(8)), cfg_degree=2, sp_ulysses_degree=4, timeout=1800)
+    else:
+        raise ValueError(f"Unsupported parallelism: {parallelism}. Must be 1, 2, 4, or 8.")
+
+    # Pipeline configuration
+    dit_config = ModelRuntimeConfig(torch_dtype=torch.bfloat16)
+    dit_config.attention_config = AttentionConfig.dense_attention(PPL_CONFIG["attn_impl"])
+    dit_config.parallel_config = parallel_config
+
+    pipe_config = LongCatVideoPipelineConfig(
+        vae_config=ModelRuntimeConfig(torch_dtype=torch.bfloat16),
+        dit_config=dit_config,
+        text_encoding_config=ModelRuntimeConfig(torch_dtype=torch.bfloat16),
+        vfi_config=ModelRuntimeConfig(torch_dtype=torch.bfloat16),
+        sample_solver="euler",
+        enable_denoising_parallel=(parallelism > 1),
+        enable_vfi=True,
+    )
+
+    pipe_config.dit_config.offload_config.offload_type = WeightOffloadType.ASYNC_CPU_OFFLOAD
+
+    if parallelism > 1:
+        pipe_config.dit_config.parallel_config.enable_fsdp = True
+    pipe = LongCatVideoPipeline(device="cuda", torch_dtype=torch.bfloat16)
+    pipe.init(module_manager, pipe_config)
+    pipe.enable_cpu_offload()
+
+    return pipe
+
+
+def log_gpu_memory(tag: str, device_count: int = 1):
+    """Log GPU memory usage for debugging."""
+    for i in range(device_count):
+        allocated = torch.cuda.memory_allocated(i) / (1024**3)
+        reserved = torch.cuda.memory_reserved(i) / (1024**3)
+        print(f"  [{tag}] GPU {i}: allocated={allocated:.2f} GB, reserved={reserved:.2f} GB")
+
+
+def clear_gpu_cache(device_count: int = 1):
+    """Force garbage collection and clear CUDA cache on all devices."""
+    gc.collect()
+    for i in range(device_count):
+        with torch.cuda.device(i):
+            torch.cuda.empty_cache()
+
+
+def run(
+    pipeline,
+    input_video,
+    prompt,
+    height,
+    width,
+    negative_prompt="",
+    seed=PPL_CONFIG["seed"],
+    return_latents=False,
+    need_encode=True,
+):
+    video, latents = pipeline(
+        input_video=input_video,
+        prompt=prompt,
+        negative_prompt=f"{negative_prompt} {PPL_CONFIG['negative_prompt']}",
+        num_inference_steps=PPL_CONFIG["num_inference_steps"],
+        num_frames=PPL_CONFIG["num_frames"],
+        cfg_scale=PPL_CONFIG["cfg_scale"],
+        seed=seed,
+        tiled=PPL_CONFIG["tiled"],
+        height=height,
+        width=width,
+        attn_impl=PPL_CONFIG["attn_impl"],
+        use_kv_cache=PPL_CONFIG["use_kv_cache"],
+        return_latents=return_latents,
+        need_encode=need_encode,
+        target_fps=PPL_CONFIG["target_fps"] if PPL_CONFIG["target_fps"] > PPL_CONFIG["base_fps"] else None,
+    )
+
+    if return_latents:
+        return video, latents
+    return video
+
+
+def run_with_file(
+    pipeline,
+    prompt,
+    negative_prompt="",
+    seed=PPL_CONFIG["seed"],
+    output_path="output.mp4",
+    ref_video_path="",
+    **kwargs,
+):
+    """Service-compatible entry point for task-based execution."""
+    input_video = VideoData(ref_video_path)
+    height, width = input_video.height, input_video.width
+    video = run(pipeline, input_video, prompt, height, width, negative_prompt, seed)
+    save_video(video, output_path, fps=PPL_CONFIG["target_fps"], quality=6)
+
+
+@click.command()
+@click.option("--gpu_num", default=1, help="Number of GPUs to use, default is 1")
+@click.option(
+    "--video_path",
+    default=None,
+    help="Input video path",
+)
+@click.option(
+    "--prompt",
+    default="The camera continues to follow the blooming flower, capturing its vibrant petals unfurling gracefully.",
+    help="Positive guidance text prompt",
+)
+@click.option("--negative_prompt", default="", help="Negative guidance prompt")
+@click.option("--seed", default=PPL_CONFIG["seed"], help="Random seed")
+@click.option(
+    "--benchmark",
+    is_flag=True,
+    help="Run benchmark test with multiple video segments",
+)
+def main(gpu_num, video_path, prompt, negative_prompt, seed, benchmark):
+    """Video continuation using LongCat Video model"""
+    pipe = get_pipeline(gpu_num)
+    output_dir = os.getenv("TELEAI_EXAMPLE_OUTPUT_DIR", "./")
+
+    if benchmark:
+        # Run benchmark test
+        benchmark_file = "/nvfile-heatstorage/AIGC_H100/ICET/cjf/TeleFuser/examples/data/ContinueBmk_2_translated.json"
+        if not os.path.exists(benchmark_file):
+            print(f"Benchmark file not found: {benchmark_file}")
+            return
+
+        with open(benchmark_file) as f:
+            bmk = json.load(f)
+
+        for item in tqdm(bmk["items"]):
+            item_id = item["id"]
+            log_gpu_memory(f"Before item {item_id}", device_count=gpu_num)
+
+            cond = item["condition"]
+            prompt_list = cond["prompt_en"]
+            ref_video_path = cond["ref_video"]["1"]
+            all_frames = []
+
+            latents = None
+            for i in range(3):
+                if i == 0:
+                    input_video = VideoData(ref_video_path)
+                    height, width = input_video.height, input_video.width
+                    all_frames.extend(input_video.raw_data())
+                    need_encode = True
+                else:
+                    input_video = latents
+                    need_encode = False
+
+                prompt = prompt_list[str(i + 1)]
+                start = time.time()
+                video, latents = run(
+                    pipe, input_video, prompt, height, width, return_latents=True, need_encode=need_encode
+                )
+                elapsed_time = time.time() - start
+                print(f"Segment {i + 1} generation time: {elapsed_time:.2f} seconds")
+
+                all_frames.extend(video)
+
+                # Clean up intermediate references after each segment
+                del video
+                if i > 0:
+                    del input_video
+                gc.collect()
+
+            result_path = os.path.join(output_dir, f"{item_id}_all.mp4")
+            save_video(all_frames, result_path, fps=PPL_CONFIG["target_fps"], quality=6)
+            print(f"Final video saved to: {result_path}")
+
+            # === Critical: clean up between items ===
+            del all_frames
+            del latents
+            clear_gpu_cache(device_count=gpu_num)
+            log_gpu_memory(f"After cleanup item {item_id}", device_count=gpu_num)
+
+    else:
+        # Single video continuation
+        if video_path is None:
+            print("Error: --video_path is required when not running benchmark")
+            return
+
+        input_video = VideoData(video_path)
+        height, width = input_video.height, input_video.width
+
+        # Run inference
+        start = time.time()
+        video = run(pipe, input_video, prompt, height, width, negative_prompt, seed)
+        elapsed_time = time.time() - start
+
+        print(f"Video generation time: {elapsed_time:.2f} seconds")
+
+        # Save results
+        filename = get_example_name(__file__)
+        output_path = os.path.join(output_dir, filename)
+
+        save_video(video, output_path, fps=PPL_CONFIG["target_fps"], quality=6)
+        print(f"Video saved to: {output_path}")
+
+    del pipe
+    clear_gpu_cache(device_count=gpu_num)
+
+
+if __name__ == "__main__":
+    main()
