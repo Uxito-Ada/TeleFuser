@@ -2080,6 +2080,40 @@ class LTXVideoTransformer(BaseModel):
         # Interface parity with other DiT models. LTX pipeline does not currently use sequence-parallel.
         self.usp_flag = True
 
+    def compile(self, mode: str = "blocks", **kwargs) -> None:
+        """Compile model for better performance with torch.compile.
+
+        Args:
+            mode: Compilation mode:
+                - "blocks": Compile only _process_transformer_blocks (default, most effective)
+                - "full": Compile entire forward method
+            **kwargs: Arguments passed to torch.compile()
+        """
+        # Import mark_static from torch._dynamo
+        try:
+            from torch._dynamo import mark_static
+
+            # Mark module classes as static (instance attributes won't change after compile)
+            mark_static(LTXVideoTransformer)
+            mark_static(LTXModel)
+            mark_static(BasicAVTransformerBlock)
+            mark_static(Attention)
+        except ImportError:
+            logger.warning("torch._dynamo.mark_static not available, skipping static marking")
+
+        # Compile based on mode
+        if mode == "blocks":
+            original_fn = self.velocity_model._process_transformer_blocks
+            self.velocity_model._process_transformer_blocks = torch.compile(original_fn, **kwargs)
+            logger.info(f"LTXVideoTransformer compiled: mode={mode}")
+        elif mode == "full":
+            # Store original forward for fallback
+            self._original_forward = self.forward
+            self.forward = torch.compile(self.forward, **kwargs)
+            logger.info(f"LTXVideoTransformer compiled: mode={mode}")
+        else:
+            raise ValueError(f"Unknown compile mode: {mode}")
+
     def enable_async_offload(self, device: torch.device, offload_config: OffloadConfig) -> None:
         raise NotImplementedError("Async offload is not implemented for LTXVideoTransformer yet.")
 

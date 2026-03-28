@@ -12,11 +12,12 @@ from torch._prims_common import DeviceLikeType
 from telefuser.core.base_stage import BaseStage, with_model_offload
 from telefuser.core.config import ModelRuntimeConfig
 from telefuser.core.module_manager import ModuleManager
-from telefuser.models.ltx_dit import X0Model
+from telefuser.models.ltx_dit import LTXVideoTransformer
 from telefuser.models.ltx_video_vae import VIDEO_SCALE_FACTORS, SpatioTemporalScaleFactors, VideoLatentShape
 from telefuser.schedulers.flow_match import FlowMatchScheduler
 from telefuser.utils.lora_loader import LoRALoader
 from telefuser.utils.profiler import ProfilingContext4Debug
+from telefuser.utils.torch_compile import set_compile_configs
 
 STAGE_2_DISTILLED_SIGMA_VALUES = [0.909375, 0.725, 0.421875, 0.0]
 VIDEO_LATENT_CHANNELS = 128
@@ -557,7 +558,7 @@ class DitDenoisingStage(BaseStage):
         scheduler: object,
     ):
         super().__init__(name, model_runtime_config)
-        self.dit: X0Model = module_manager.fetch_module(model_name)
+        self.dit: LTXVideoTransformer = module_manager.fetch_module(model_name)
         if self.dit is not None and hasattr(self.dit, "set_attention_config"):
             self.dit.set_attention_config(model_runtime_config.attention_config)
         self.model_names = ["dit"]
@@ -566,6 +567,13 @@ class DitDenoisingStage(BaseStage):
         self.video_patchifier = VideoLatentPatchifier(patch_size=1)
         self.audio_patchifier = AudioPatchifier(patch_size=1)
         self._lora_applied = False
+
+        # Handle torch.compile - only compile in __init__ if single GPU mode
+        parallel_cfg = model_runtime_config.parallel_config
+        if model_runtime_config.compile and parallel_cfg.world_size == 1:
+            set_compile_configs(descent_tuning=True, compute_comm_overlap=False)
+            logger.info("enable torch.compile for ltx dit (single GPU mode)")
+            self.dit.compile()
 
     def _maybe_apply_loras(self) -> None:
         """Apply configured LoRA weights to the underlying velocity model (once).
