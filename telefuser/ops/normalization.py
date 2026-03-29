@@ -1,64 +1,157 @@
-"""Normalization layers including RMSNorm, LayerNorm, and adaptive layer norm."""
+"""Normalization layers including RMSNorm, LayerNorm, and adaptive layer norm.
+
+Uses CustomOp base class for automatic dispatch between optimized kernels
+(Triton on CUDA) and PyTorch-native implementations based on compile state.
+"""
 
 from __future__ import annotations
 
+import functools
+from typing import Callable, Literal
+
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
-# Try to import tf_kernel rmsnorm for better performance on CUDA
-try:
-    from tf_kernel import rmsnorm as tf_kernel_rmsnorm
+from .base import CustomOp
 
-    TF_KERNEL_AVAILABLE = True
-except ImportError:
-    TF_KERNEL_AVAILABLE = False
-
-    def tf_kernel_rmsnorm(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
-        """Stub function when tf_kernel is not available."""
-        raise ImportError("tf_kernel is required for rmsnorm but not installed")
+KernelName = Literal["rms_norm", "layer_norm_fn", "fused_scale_shift"]
 
 
-# Try to import triton kernels
-try:
-    import triton  # noqa: F401
+@functools.lru_cache(maxsize=None)
+def _get_triton_kernel(name: KernelName) -> Callable:
+    """Lazily import Triton kernel to avoid import errors on non-CUDA platforms."""
+    if name == "rms_norm":
+        from telefuser.kernel.triton import rms_norm
 
-    HAS_TRITON = True
-except ImportError:
-    HAS_TRITON = False
+        return rms_norm
+    elif name == "layer_norm_fn":
+        from telefuser.kernel.triton import layer_norm_fn
 
-if HAS_TRITON:
-    from telefuser.kernel.triton import fused_scale_shift, layer_norm_fn, rms_norm
-else:
+        return layer_norm_fn
+    elif name == "fused_scale_shift":
+        from telefuser.kernel.triton import fused_scale_shift
 
-    def _make_stub(name: str):
-        def stub(*args, **kwargs):
-            raise ImportError(f"triton is required for {name} but not installed")
-
-        stub.__name__ = name
-        return stub
-
-    fused_scale_shift = _make_stub("fused_scale_shift")
-    rms_norm = _make_stub("rms_norm")
-    layer_norm_fn = _make_stub("layer_norm_fn")
+        return fused_scale_shift
+    raise ValueError(f"Unknown kernel: {name}")
 
 
-def modulate(x: torch.Tensor, shift: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
-    """Apply modulation: x * (1 + scale) + shift.
+class RMSNorm(CustomOp):
+    """Root Mean Square Layer Normalization.
 
-    Uses Triton kernel when on CUDA for better performance.
+    Reference: https://huggingface.co/papers/1910.07467
+
+    Automatically uses Triton kernel on CUDA in eager mode for better performance.
+    Falls back to PyTorch implementation in compile mode or on non-CUDA devices.
 
     Args:
-        x: Input tensor to modulate.
-        shift: Shift tensor for additive modulation.
-        scale: Scale tensor for multiplicative modulation.
-
-    Returns:
-        Modulated tensor: x * (1 + scale) + shift
+        dim: Dimension for learnable weights.
+        eps: Epsilon for numerical stability.
+        elementwise_affine: Whether to use learnable weights.
+        bias: Whether to use learnable bias.
     """
-    # Triton kernel requires tensor to be on CUDA device
-    if x.device.type == "cuda" and HAS_TRITON:
-        return fused_scale_shift(x, scale, shift)
-    return x * (1 + scale) + shift
+
+    def __init__(
+        self,
+        dim: int,
+        eps: float = 1e-5,
+        elementwise_affine: bool = True,
+        bias: bool = False,
+    ):
+        super().__init__()
+        self.eps = eps
+        self.elementwise_affine = elementwise_affine
+
+        if elementwise_affine:
+            self.weight = nn.Parameter(torch.ones(dim))
+            if bias:
+                self.bias = nn.Parameter(torch.zeros(dim))
+            else:
+                self.register_parameter("bias", None)
+        else:
+            self.register_parameter("weight", None)
+            self.register_parameter("bias", None)
+
+    def forward_cuda(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """CUDA-optimized implementation using Triton kernel.
+
+        Note: Device check is needed because CustomOp dispatches based on platform
+        availability, not tensor device. CPU tensors on CUDA platform should fall back.
+        """
+        if hidden_states.device.type != "cuda":
+            return self.forward_native(hidden_states)
+        if self.elementwise_affine and self.bias is None:
+            assert self.weight is not None
+            rms_norm = _get_triton_kernel("rms_norm")
+            return rms_norm(hidden_states, self.weight, self.eps)
+        return self.forward_native(hidden_states)
+
+    def forward_native(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        """PyTorch-native implementation for compile compatibility."""
+        input_dtype = hidden_states.dtype
+        # FP32 computation for numerical stability
+        variance = hidden_states.to(torch.float32).pow(2).mean(-1, keepdim=True)
+        hidden_states = hidden_states * torch.rsqrt(variance + self.eps)
+
+        if self.weight is not None:
+            # Cast to weight dtype for half-precision support
+            if self.weight.dtype in [torch.float16, torch.bfloat16]:
+                hidden_states = hidden_states.to(self.weight.dtype)
+            hidden_states = hidden_states * self.weight
+            if self.bias is not None:
+                hidden_states = hidden_states + self.bias
+        else:
+            hidden_states = hidden_states.to(input_dtype)
+
+        return hidden_states
+
+
+class LayerNorm(CustomOp):
+    """Layer Normalization with optimized Triton kernel support on CUDA.
+
+    Uses Triton kernel when on CUDA in eager mode for better performance.
+    Falls back to PyTorch for non-CUDA tensors, non-affine case, or when compiling.
+
+    Args:
+        dim: Dimension for learnable weights.
+        eps: Epsilon for numerical stability.
+        elementwise_affine: Whether to use learnable weights and bias.
+        bias: Whether to use bias.
+    """
+
+    def __init__(self, dim: int, eps: float = 1e-6, elementwise_affine: bool = True, bias: bool = True):
+        super().__init__()
+        self.eps = eps
+        self.elementwise_affine = elementwise_affine
+        if elementwise_affine:
+            self.weight = nn.Parameter(torch.ones(dim))
+            if bias:
+                self.bias = nn.Parameter(torch.zeros(dim))
+            else:
+                self.register_parameter("bias", None)
+        else:
+            self.register_parameter("weight", None)
+            self.register_parameter("bias", None)
+
+    def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
+        """CUDA-optimized implementation using Triton kernel.
+
+        Note: Device check is needed because CustomOp dispatches based on platform
+        availability, not tensor device. CPU tensors on CUDA platform should fall back.
+        """
+        if x.device.type != "cuda":
+            return self.forward_native(x)
+        if not self.elementwise_affine:
+            return self.forward_native(x)
+
+        layer_norm_fn = _get_triton_kernel("layer_norm_fn")
+        return layer_norm_fn(x, self.weight, self.bias, eps=self.eps)
+
+    def forward_native(self, x: torch.Tensor) -> torch.Tensor:
+        """PyTorch-native implementation for compile compatibility."""
+        if self.elementwise_affine:
+            return F.layer_norm(x, (x.shape[-1],), self.weight, self.bias, self.eps)
+        return F.layer_norm(x, (x.shape[-1],), eps=self.eps)
 
 
 class AdaLayerNormContinuous(nn.Module):
@@ -104,119 +197,58 @@ class AdaLayerNormContinuous(nn.Module):
         return x
 
 
-class RMSNorm(nn.Module):
-    """Root Mean Square Layer Normalization.
+def fused_scale_shift(
+    x: torch.Tensor,
+    scale: torch.Tensor,
+    shift: torch.Tensor,
+    scale_constant: float = 1.0,
+) -> torch.Tensor:
+    """Fused scale and shift operation.
 
-    Reference: https://huggingface.co/papers/1910.07467
+    Computes: output = x * (scale_constant + scale) + shift
 
-    Uses tf_kernel rmsnorm when available on CUDA for best performance,
-    falls back to Triton kernel, then to PyTorch for non-CUDA tensors.
-
-    Args:
-        dim: Dimension for learnable weights.
-        eps: Epsilon for numerical stability.
-        elementwise_affine: Whether to use learnable weights.
-        bias: Whether to use learnable bias.
-    """
-
-    def __init__(
-        self,
-        dim: int,
-        eps: float = 1e-5,
-        elementwise_affine: bool = True,
-        bias: bool = False,
-    ):
-        super().__init__()
-        self.eps = eps
-        self.elementwise_affine = elementwise_affine
-
-        if elementwise_affine:
-            self.weight = nn.Parameter(torch.ones(dim))
-            if bias:
-                self.bias = nn.Parameter(torch.zeros(dim))
-            else:
-                self.register_parameter("bias", None)
-        else:
-            self.register_parameter("weight", None)
-            self.register_parameter("bias", None)
-
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        # Use PyTorch implementation when compiling (better for torch.compile optimization)
-        if torch.compiler.is_compiling():
-            return self._forward_pytorch(hidden_states)
-
-        # Fast path: use optimized kernels on CUDA device in eager mode
-        # Triton and tf_kernel only support CUDA platform
-        if hidden_states.device.type == "cuda" and self.elementwise_affine and self.bias is None:
-            assert self.weight is not None, "weight should not be None when elementwise_affine=True"
-            # Prefer tf_kernel if available (optimized CUDA kernel)
-            if TF_KERNEL_AVAILABLE:
-                input_shape = hidden_states.shape
-                if hidden_states.ndim > 2:
-                    hidden_states_2d = hidden_states.view(-1, input_shape[-1])
-                    out = tf_kernel_rmsnorm(hidden_states_2d, self.weight, self.eps)
-                    return out.view(input_shape)
-                return tf_kernel_rmsnorm(hidden_states, self.weight, self.eps)
-            # Fallback to Triton kernel
-            if HAS_TRITON:
-                return rms_norm(hidden_states, self.weight, self.eps)
-
-        return self._forward_pytorch(hidden_states)
-
-    def _forward_pytorch(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        """PyTorch implementation for compilation compatibility."""
-        input_dtype = hidden_states.dtype
-        # FP32 computation for numerical stability
-        variance = hidden_states.to(torch.float32).pow(2).mean(-1, keepdim=True)
-        hidden_states = hidden_states * torch.rsqrt(variance + self.eps)
-
-        if self.weight is not None:
-            # Cast to weight dtype for half-precision support
-            if self.weight.dtype in [torch.float16, torch.bfloat16]:
-                hidden_states = hidden_states.to(self.weight.dtype)
-            hidden_states = hidden_states * self.weight
-            if self.bias is not None:
-                hidden_states = hidden_states + self.bias
-        else:
-            hidden_states = hidden_states.to(input_dtype)
-
-        return hidden_states
-
-
-class LayerNorm(nn.Module):
-    """Layer Normalization with optimized Triton kernel support on CUDA.
-
-    Uses Triton kernel when on CUDA for better performance in eager mode.
-    Falls back to PyTorch for non-CUDA tensors, non-affine case, or when compiling.
+    Uses Triton kernel on CUDA in eager mode for better performance.
+    Falls back to PyTorch implementation in compile mode or on non-CUDA devices.
 
     Args:
-        dim: Dimension for learnable weights.
-        eps: Epsilon for numerical stability.
-        elementwise_affine: Whether to use learnable weights and bias.
+        x: Input tensor of shape [B, L, C]
+        scale: Scale tensor
+        shift: Shift tensor
+        scale_constant: Constant to add to scale (default 1.0)
+
+    Returns:
+        Output tensor of same shape as input
     """
+    if torch.compiler.is_compiling():
+        return x * (scale_constant + scale) + shift
 
-    def __init__(self, dim: int, eps: float = 1e-6, elementwise_affine: bool = True, bias: bool = True):
-        super().__init__()
-        self.eps = eps
-        self.elementwise_affine = elementwise_affine
-        if elementwise_affine:
-            self.weight = nn.Parameter(torch.ones(dim))
-            if bias:
-                self.bias = nn.Parameter(torch.zeros(dim))
-            else:
-                self.register_parameter("bias", None)
-        else:
-            self.register_parameter("weight", None)
-            self.register_parameter("bias", None)
+    if x.device.type == "cuda" and x.is_contiguous():
+        fused_scale_shift_kernel = _get_triton_kernel("fused_scale_shift")
+        return fused_scale_shift_kernel(x, scale, shift, scale_constant)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # Use PyTorch built-in layer_norm when compiling (better for torch.compile optimization)
-        # or when not on CUDA device, or when non-affine
-        # Triton kernels only support CUDA platform
-        if torch.compiler.is_compiling() or x.device.type != "cuda" or not self.elementwise_affine or not HAS_TRITON:
-            if self.elementwise_affine:
-                return nn.functional.layer_norm(x, (x.shape[-1],), self.weight, self.bias, self.eps)
-            return nn.functional.layer_norm(x, (x.shape[-1],), eps=self.eps)
+    return x * (scale_constant + scale) + shift
 
-        # Use Triton kernel in eager mode for better performance
-        return layer_norm_fn(x, self.weight, self.bias, eps=self.eps)
+
+def modulate(x: torch.Tensor, shift: torch.Tensor, scale: torch.Tensor) -> torch.Tensor:
+    """Apply modulation: x * (1 + scale) + shift.
+
+    Uses fused_scale_shift on CUDA in eager mode for better performance.
+
+    Args:
+        x: Input tensor to modulate.
+        shift: Shift tensor for additive modulation.
+        scale: Scale tensor for multiplicative modulation.
+
+    Returns:
+        Modulated tensor: x * (1 + scale) + shift
+    """
+    return fused_scale_shift(x, scale, shift, scale_constant=1.0)
+
+
+__all__ = [
+    "RMSNorm",
+    "LayerNorm",
+    "AdaLayerNormContinuous",
+    "fused_scale_shift",
+    "modulate",
+]

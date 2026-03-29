@@ -32,6 +32,7 @@ from einops import rearrange
 
 from telefuser.core.base_model import BaseModel
 from telefuser.core.config import AttentionConfig, AttnImplType
+from telefuser.ops import LayerNorm, RMSNorm, modulate
 from telefuser.ops.attention import attention as attn_func
 from telefuser.utils.logging import logger
 
@@ -314,33 +315,12 @@ def get_activation_layer(act_type: str = "gelu_tanh"):
 # =============================================================================
 
 
-class RMSNorm(nn.Module):
-    """Root Mean Square Layer Normalization."""
-
-    def __init__(self, hidden_size, elementwise_affine=True, eps=1e-6, device=None, dtype=None):
-        factory_kwargs = {"device": device, "dtype": dtype}
-        super().__init__()
-        self.elementwise_affine = elementwise_affine
-        self.eps = eps
-        if elementwise_affine:
-            self.weight = nn.Parameter(torch.ones(hidden_size, **factory_kwargs))
-        else:
-            self.register_parameter("weight", None)
-
-    def forward(self, x):
-        variance = x.pow(2).mean(-1, keepdim=True)
-        x = x * torch.rsqrt(variance + self.eps)
-        if self.weight is not None:
-            return x * self.weight
-        return x
-
-
 def get_norm_layer(norm_type: str = "rms"):
     """Get normalization layer by type."""
     if norm_type == "rms":
         return RMSNorm
     elif norm_type == "layer":
-        return nn.LayerNorm
+        return LayerNorm
     else:
         raise ValueError(f"Unknown norm type: {norm_type}")
 
@@ -373,18 +353,6 @@ class ModulateDiT(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.linear(self.act(x))
-
-
-def modulate(x, shift=None, scale=None):
-    """Modulate by shift and scale."""
-    if scale is None and shift is None:
-        return x
-    elif shift is None:
-        return x * (1 + scale.unsqueeze(1))
-    elif scale is None:
-        return x + shift.unsqueeze(1)
-    else:
-        return x * (1 + scale.unsqueeze(1)) + shift.unsqueeze(1)
 
 
 def apply_gate(x, gate=None, tanh=False):

@@ -8,8 +8,6 @@ import torch
 import triton
 import triton.language as tl
 
-from .custom_op import register_custom_op
-
 
 @triton.jit
 def _rms_norm_tiled_onepass(
@@ -52,13 +50,9 @@ def _rms_norm_tiled_onepass(
     tl.store(y_blk, x * rstd * w, mask=mask)
 
 
-@register_custom_op(
-    op_name="telefuser::one_pass_rms_norm",
-    mutates_args=["y"],
-)
-def _triton_one_pass_rms_norm_impl(
+def _triton_one_pass_rms_norm(
     x_view: torch.Tensor,
-    y: torch.Tensor,
+    y_view: torch.Tensor,
     w: torch.Tensor,
     S: int,
     D: int,
@@ -66,10 +60,10 @@ def _triton_one_pass_rms_norm_impl(
     block_size_dim: int,
     block_size_seq: int,
 ) -> None:
-    """Internal implementation for one-pass RMSNorm, wrapped as custom op."""
+    """Internal implementation for one-pass RMSNorm."""
     grid = (triton.cdiv(S, block_size_seq),)
     torch.library.wrap_triton(_rms_norm_tiled_onepass)[grid](
-        y,
+        y_view,
         x_view,
         w,
         S,
@@ -104,7 +98,7 @@ def triton_one_pass_rms_norm(x: torch.Tensor, w: torch.Tensor, eps: float = 1e-6
     BLOCK_SIZE_SEQ = min(16, triton.next_power_of_2(max(1, S // 512)))
 
     with torch.cuda.device(x.device):
-        _triton_one_pass_rms_norm_impl(
+        _triton_one_pass_rms_norm(
             x_view,
             y_view,
             w,

@@ -2,6 +2,66 @@
 
 本文档介绍 TeleFuser 的 `ops` 模块，提供高效的视频生成神经网络算子实现。
 
+## 架构原则
+
+TeleFuser 遵循严格的分层架构：
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                      models/                                 │
+│  (DiT, VAE, text encoders - 只能从 ops/ 导入)               │
+└─────────────────────────┬───────────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────────────┐
+│                       ops/                                   │
+│  (编译感知分发：compile 时用 native，eager 时用 kernel。     │
+│   基类：CustomOp, CustomOpFunction)                          │
+└─────────────────────────┬───────────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────────────┐
+│                   kernel/triton/                             │
+│  (纯 Triton 内核，custom ops。不直接被 models 使用。         │
+│   可能有 torch.library.custom_op 注册)                       │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### 关键规则
+
+1. **models/** 层只能从 `telefuser.ops/` 导入：
+   ```python
+   # ✅ 正确
+   from telefuser.ops.normalization import RMSNorm, LayerNorm, modulate
+   from telefuser.ops.rotary import apply_rotary_emb
+   from telefuser.ops.attention import attention
+
+   # ❌ 错误 - 模型中绝不要从 kernel 层导入
+   from telefuser.kernel.triton import apply_rotary_embedding
+   from telefuser.kernel.triton import fused_scale_shift
+   ```
+
+2. **ops/** 层负责编译感知分发：
+   ```python
+   # 在 ops/normalization.py 中
+   class RMSNorm(CustomOp):
+       def forward(self, x):
+           if torch.compiler.is_compiling():
+               return self.forward_native(x)  # PyTorch 原生实现
+           return self.forward_cuda(x)  # Triton 内核
+   ```
+
+3. **kernel/triton/** 包含纯 Triton 代码：
+   - 无编译状态检查（由 ops 层处理）
+   - 可使用 `torch.library.custom_op` 以支持 torch.compile
+   - 只被 ops 层调用，绝不直接被 models 调用
+
+### 为什么采用此架构？
+
+- **torch.compile 兼容性**：ops 层在编译时分发到 PyTorch 原生实现，让 Inductor 可以跨层融合操作
+- **性能优化**：ops 层在 eager 模式下使用优化的 Triton 内核
+- **关注点分离**：kernel 层专注纯内核实现，ops 层处理分发逻辑
+
 ## 概述
 
 `telefuser/ops` 模块包含以下核心组件：

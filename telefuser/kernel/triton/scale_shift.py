@@ -4,13 +4,9 @@ Adapted from sglang diffusion kernels for TeleFuser.
 Useful for video/image generation models with adaptive normalization.
 """
 
-from __future__ import annotations
-
 import torch
 import triton
 import triton.language as tl
-
-from .custom_op import register_custom_op
 
 
 @triton.autotune(
@@ -171,9 +167,6 @@ def fused_scale_shift(
     - scale/shift shape [B, L, C] (per-token, 3D)
     - scale/shift scalar
 
-    Note: This function uses Triton kernels and is wrapped with
-    torch.compiler.disable for compile compatibility.
-
     Args:
         x: Input tensor of shape [B, L, C]
         scale: Scale tensor
@@ -185,22 +178,6 @@ def fused_scale_shift(
     Returns:
         Output tensor of same shape as input
     """
-    return _fused_scale_shift_impl(x, scale, shift, scale_constant, block_l, block_c)
-
-
-@register_custom_op(
-    op_name="telefuser::fused_scale_shift",
-    mutates_args=(),
-)
-def _fused_scale_shift_impl(
-    x: torch.Tensor,
-    scale: torch.Tensor,
-    shift: torch.Tensor,
-    scale_constant: float,
-    block_l: int,
-    block_c: int,
-) -> torch.Tensor:
-    """Internal implementation of fused scale and shift using Triton kernels."""
     assert x.is_cuda and scale.is_cuda
     assert x.is_contiguous()
 
@@ -573,29 +550,6 @@ def fused_layernorm_scale_shift_gate_select01(
     Returns:
         Tuple of (output tensor, selected gate tensor)
     """
-    return _fused_layernorm_scale_shift_gate_select01_impl(
-        x, weight, bias, scale0, shift0, gate0, scale1, shift1, gate1, index, eps
-    )
-
-
-@register_custom_op(
-    op_name="telefuser::fused_layernorm_scale_shift_gate_select01",
-    mutates_args=(),
-)
-def _fused_layernorm_scale_shift_gate_select01_impl(
-    x: torch.Tensor,
-    weight: torch.Tensor | None,
-    bias: torch.Tensor | None,
-    scale0: torch.Tensor,
-    shift0: torch.Tensor,
-    gate0: torch.Tensor,
-    scale1: torch.Tensor,
-    shift1: torch.Tensor,
-    gate1: torch.Tensor,
-    index: torch.Tensor,
-    eps: float,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Internal implementation of fused LayerNorm + scale/shift + gate selection."""
     assert x.is_cuda
     assert x.is_contiguous()
     B, L, C = x.shape
@@ -710,31 +664,6 @@ def fused_residual_layernorm_scale_shift_gate_select01(
     Returns:
         Tuple of (output tensor, residual_out tensor, selected gate tensor)
     """
-    return _fused_residual_layernorm_scale_shift_gate_select01_impl(
-        x, residual, residual_gate, weight, bias, scale0, shift0, gate0, scale1, shift1, gate1, index, eps
-    )
-
-
-@register_custom_op(
-    op_name="telefuser::fused_residual_layernorm_scale_shift_gate_select01",
-    mutates_args=(),
-)
-def _fused_residual_layernorm_scale_shift_gate_select01_impl(
-    x: torch.Tensor,
-    residual: torch.Tensor,
-    residual_gate: torch.Tensor,
-    weight: torch.Tensor | None,
-    bias: torch.Tensor | None,
-    scale0: torch.Tensor,
-    shift0: torch.Tensor,
-    gate0: torch.Tensor,
-    scale1: torch.Tensor,
-    shift1: torch.Tensor,
-    gate1: torch.Tensor,
-    index: torch.Tensor,
-    eps: float,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Internal implementation of fused residual + LayerNorm + scale/shift + gate selection."""
     assert x.is_cuda
     assert x.is_contiguous()
     assert residual.is_contiguous()
@@ -943,26 +872,6 @@ def fused_scale_shift_gate_select(
     Returns:
         Tuple of (output tensor, selected gate tensor)
     """
-    return _fused_scale_shift_gate_select_impl(x, scale0, shift0, gate0, scale1, shift1, gate1, index, block_l, block_c)
-
-
-@register_custom_op(
-    op_name="telefuser::fused_scale_shift_gate_select",
-    mutates_args=(),
-)
-def _fused_scale_shift_gate_select_impl(
-    x: torch.Tensor,
-    scale0: torch.Tensor,
-    shift0: torch.Tensor,
-    gate0: torch.Tensor,
-    scale1: torch.Tensor,
-    shift1: torch.Tensor,
-    gate1: torch.Tensor,
-    index: torch.Tensor,
-    block_l: int,
-    block_c: int,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """Internal implementation of fused scale, shift, and gate selection."""
     assert x.is_contiguous()
     B, L, C = x.shape
     output = torch.empty_like(x)

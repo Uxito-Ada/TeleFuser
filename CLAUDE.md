@@ -38,6 +38,48 @@ telefuser/
 └── client/           # Python SDK
 ```
 
+### Layer Architecture Principles
+
+TeleFuser follows a strict layered architecture for operations:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                      models/                                 │
+│  (DiT, VAE, text encoders - ONLY import from ops/)          │
+└─────────────────────────┬───────────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────────────┐
+│                       ops/                                   │
+│  (Compile-aware dispatch: native for compile, kernel for    │
+│   eager mode. Base classes: CustomOp, CustomOpFunction)     │
+└─────────────────────────┬───────────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────────────┐
+│                   kernel/triton/                             │
+│  (Pure Triton kernels, custom ops. NOT directly used by     │
+│   models. May have torch.library.custom_op registration.)   │
+└─────────────────────────────────────────────────────────────┘
+```
+
+**Key Rules:**
+
+1. **models/** layer MUST only import from `telefuser.ops/`
+   - ✅ `from telefuser.ops.normalization import RMSNorm, LayerNorm, modulate`
+   - ✅ `from telefuser.ops.rotary import apply_rotary_emb`
+   - ❌ `from telefuser.kernel.triton import apply_rotary_embedding`
+
+2. **ops/** layer handles compile-aware dispatch:
+   - `torch.compiler.is_compiling()` → PyTorch native implementation
+   - Eager mode + CUDA → Optimized Triton kernel
+   - Other platforms → PyTorch native fallback
+
+3. **kernel/triton/** contains pure Triton code:
+   - No `torch.compiler.is_compiling()` checks
+   - May use `torch.library.custom_op` for torch.compile compatibility
+   - Only used by ops/ layer, never directly by models/
+
 ## Code Style
 
 - PEP8 with ruff (line length: 120)

@@ -2,6 +2,66 @@
 
 This document introduces the `ops` module of TeleFuser, providing efficient neural network operator implementations for video generation.
 
+## Architecture Principles
+
+TeleFuser follows a strict layered architecture for operations:
+
+```
+┌─────────────────────────────────────────────────────────────┐
+│                      models/                                 │
+│  (DiT, VAE, text encoders - ONLY import from ops/)          │
+└─────────────────────────┬───────────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────────────┐
+│                       ops/                                   │
+│  (Compile-aware dispatch: native for compile, kernel for    │
+│   eager mode. Base classes: CustomOp, CustomOpFunction)     │
+└─────────────────────────┬───────────────────────────────────┘
+                          │
+                          ▼
+┌─────────────────────────────────────────────────────────────┐
+│                   kernel/triton/                             │
+│  (Pure Triton kernels, custom ops. NOT directly used by     │
+│   models. May have torch.library.custom_op registration.)   │
+└─────────────────────────────────────────────────────────────┘
+```
+
+### Key Rules
+
+1. **models/** layer MUST only import from `telefuser.ops/`:
+   ```python
+   # ✅ Correct
+   from telefuser.ops.normalization import RMSNorm, LayerNorm, modulate
+   from telefuser.ops.rotary import apply_rotary_emb
+   from telefuser.ops.attention import attention
+
+   # ❌ Wrong - Never import from kernel layer in models
+   from telefuser.kernel.triton import apply_rotary_embedding
+   from telefuser.kernel.triton import fused_scale_shift
+   ```
+
+2. **ops/** layer handles compile-aware dispatch:
+   ```python
+   # In ops/normalization.py
+   class RMSNorm(CustomOp):
+       def forward(self, x):
+           if torch.compiler.is_compiling():
+               return self.forward_native(x)  # PyTorch native
+           return self.forward_cuda(x)  # Triton kernel
+   ```
+
+3. **kernel/triton/** contains pure Triton code:
+   - No compile-state checks (handled by ops layer)
+   - May use `torch.library.custom_op` for torch.compile compatibility
+   - Only called by ops/ layer, never directly by models/
+
+### Why This Architecture?
+
+- **torch.compile compatibility**: ops layer dispatches to native PyTorch when compiling, allowing Inductor to fuse operations across layers
+- **Performance**: ops layer uses optimized Triton kernels in eager mode
+- **Separation of concerns**: kernel layer focuses on pure kernel implementation, ops layer handles dispatch logic
+
 ## Overview
 
 The `telefuser/ops` module contains the following core components:

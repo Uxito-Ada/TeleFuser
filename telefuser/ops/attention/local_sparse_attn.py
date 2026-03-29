@@ -352,7 +352,7 @@ def block_sparse_attn(
     k = rearrange(k, "b s (n d) -> b n s d", n=num_heads)
     v = rearrange(v, "b s (n d) -> b n s d", n=num_heads)
 
-    x = sparse_sageattn(q, k, v, mask_id=attention_mask.to(torch.int8), is_causal=False, tensor_layout="HND")
+    x = sparse_sageattn(q, k, v, mask_id=attention_mask.to(torch.int8), is_causal=False)
     x = rearrange(x, "b n s d -> b s (n d)", n=num_heads)
     return x
 

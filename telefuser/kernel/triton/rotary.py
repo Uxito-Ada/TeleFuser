@@ -3,13 +3,9 @@
 Adapted from sglang diffusion kernels for TeleFuser.
 """
 
-from __future__ import annotations
-
 import torch
 import triton
 import triton.language as tl
-
-from .custom_op import register_custom_op
 
 
 @triton.autotune(
@@ -71,11 +67,7 @@ def _rotary_embedding_kernel(
         tl.store(output_row_ptr + offsets_x2, o2_vals.to(x2_vals.dtype), mask=mask)
 
 
-@register_custom_op(
-    op_name="telefuser::apply_rotary_embedding",
-    mutates_args=(),
-)
-def _apply_rotary_embedding_impl(
+def _apply_rotary_embedding_kernel(
     x_reshaped: torch.Tensor,
     cos: torch.Tensor,
     sin: torch.Tensor,
@@ -85,7 +77,7 @@ def _apply_rotary_embedding_impl(
     bsz: int,
     interleaved: bool,
 ) -> torch.Tensor:
-    """Internal implementation for apply_rotary_embedding using Triton kernel."""
+    """Apply rotary embedding using Triton kernel."""
     output = torch.empty_like(x_reshaped)
 
     grid = (bsz * num_tokens * num_heads,)
@@ -140,8 +132,8 @@ def apply_rotary_embedding(
 
     x_reshaped = x.view(-1, head_size)
 
-    # Call the registered custom op
-    output_reshaped = _apply_rotary_embedding_impl(
+    # Call the kernel function
+    output_reshaped = _apply_rotary_embedding_kernel(
         x_reshaped, cos, sin, num_heads, head_size, num_tokens, bsz, interleaved
     )
 
@@ -195,11 +187,7 @@ def _rotary_embedding_inplace_kernel(
         tl.store(x_row_ptr + offsets_x2, o2_vals.to(x2_vals.dtype), mask=mask)
 
 
-@register_custom_op(
-    op_name="telefuser::apply_rotary_embedding_inplace",
-    mutates_args=["x"],
-)
-def _apply_rotary_embedding_inplace_impl(
+def _apply_rotary_embedding_inplace_kernel(
     x_reshaped: torch.Tensor,
     cos: torch.Tensor,
     sin: torch.Tensor,
@@ -209,7 +197,7 @@ def _apply_rotary_embedding_inplace_impl(
     bsz: int,
     block_hs_half: int,
 ) -> None:
-    """Internal implementation for in-place RoPE using Triton kernel."""
+    """Apply rotary embedding in-place using Triton kernel."""
     grid = (bsz * num_tokens * num_heads,)
 
     _rotary_embedding_inplace_kernel[grid](
@@ -247,5 +235,5 @@ def apply_rotary_embedding_inplace(x: torch.Tensor, cos: torch.Tensor, sin: torc
 
     BLOCK_HS_HALF = min(128, triton.next_power_of_2(head_size // 2))
 
-    # Call the registered custom op
-    _apply_rotary_embedding_inplace_impl(x_reshaped, cos, sin, num_heads, head_size, num_tokens, bsz, BLOCK_HS_HALF)
+    # Call the kernel function
+    _apply_rotary_embedding_inplace_kernel(x_reshaped, cos, sin, num_heads, head_size, num_tokens, bsz, BLOCK_HS_HALF)

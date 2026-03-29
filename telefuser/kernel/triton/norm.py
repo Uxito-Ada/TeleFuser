@@ -9,29 +9,11 @@ import torch
 import triton
 import triton.language as tl
 
-from .custom_op import register_custom_op
-
-
-def maybe_contiguous_lastdim(x):
-    """Make tensor contiguous if last dim stride is not 1."""
-    return x.contiguous() if x is not None and x.stride(-1) != 1 else x
-
-
-def maybe_contiguous(x):
-    """Make tensor contiguous if not None."""
-    return x.contiguous() if x is not None else None
-
 
 def triton_autotune_configs():
-    """Return autotune configs with valid warp count for current device."""
+    """Return autotune_configs with valid warp count for current device."""
     max_threads_per_block = 1024
-    warp_size = getattr(
-        torch.cuda.get_device_properties(torch.cuda.current_device()),
-        "warp_size",
-        32,
-    )
-    if warp_size is None:
-        warp_size = 32
+    warp_size = torch.cuda.get_device_properties(torch.cuda.current_device()).warp_size
     return [
         triton.Config({}, num_warps=warp_count)
         for warp_count in [1, 2, 4, 8, 16, 32]
@@ -55,33 +37,33 @@ def triton_autotune_configs():
 )
 @triton.jit
 def _layer_norm_fwd_1pass_kernel(
-    X,  # pointer to the input
-    Y,  # pointer to the output
-    W,  # pointer to the weights
-    B,  # pointer to the biases
-    RESIDUAL,  # pointer to the residual
+    X,
+    Y,
+    W,
+    B,
+    RESIDUAL,
     X1,
     W1,
     B1,
     Y1,
-    RESIDUAL_OUT,  # pointer to the residual
+    RESIDUAL_OUT,
     ROWSCALE,
-    SEEDS,  # Dropout seeds for each row
+    SEEDS,
     DROPOUT_MASK,
     DROPOUT_MASK1,
-    Mean,  # pointer to the mean
-    Rstd,  # pointer to the 1/std
-    stride_x_row,  # how much to increase the pointer when moving by 1 row
+    Mean,
+    Rstd,
+    stride_x_row,
     stride_y_row,
     stride_res_row,
     stride_res_out_row,
     stride_x1_row,
     stride_y1_row,
-    M,  # number of rows in X
-    N,  # number of columns in X
-    eps,  # epsilon to avoid division by zero
-    dropout_p,  # Dropout probability
-    zero_centered_weight,  # If true, add 1.0 to the weight
+    M,
+    N,
+    eps,
+    dropout_p,
+    zero_centered_weight,
     IS_RMS_NORM: tl.constexpr,
     BLOCK_N: tl.constexpr,
     HAS_RESIDUAL: tl.constexpr,
@@ -95,7 +77,6 @@ def _layer_norm_fwd_1pass_kernel(
     HAS_W1: tl.constexpr,
     HAS_B1: tl.constexpr,
 ):
-    # Map the program id to the row of X and Y it should compute.
     row = tl.program_id(0)
     X += row * stride_x_row
     Y += row * stride_y_row
@@ -107,14 +88,12 @@ def _layer_norm_fwd_1pass_kernel(
         X1 += row * stride_x1_row
     if HAS_W1:
         Y1 += row * stride_y1_row
-    # Compute mean and variance
     cols = tl.arange(0, BLOCK_N)
     x = tl.load(X + cols, mask=cols < N, other=0.0).to(tl.float32)
     if HAS_ROWSCALE:
         rowscale = tl.load(ROWSCALE + row).to(tl.float32)
         x *= rowscale
     if HAS_DROPOUT:
-        # Compute dropout mask
         keep_mask = tl.rand(tl.load(SEEDS + row).to(tl.uint32), cols, n_rounds=7) > dropout_p
         x = tl.where(keep_mask, x / (1.0 - dropout_p), 0.0)
         if STORE_DROPOUT_MASK:
@@ -145,7 +124,6 @@ def _layer_norm_fwd_1pass_kernel(
         var = tl.sum(xbar * xbar, axis=0) / N
     rstd = 1 / tl.sqrt(var + eps)
     tl.store(Rstd + row, rstd)
-    # Normalize and apply linear transformation
     mask = cols < N
     if HAS_WEIGHT:
         w = tl.load(W + cols, mask=mask).to(tl.float32)
@@ -158,7 +136,6 @@ def _layer_norm_fwd_1pass_kernel(
         y = x_hat * w + b if HAS_BIAS else x_hat * w
     else:
         y = x_hat + b if HAS_BIAS else x_hat
-    # Write output
     tl.store(Y + cols, y, mask=mask)
     if HAS_W1:
         w1 = tl.load(W1 + cols, mask=mask).to(tl.float32)
@@ -235,7 +212,6 @@ def _layer_norm_fwd_impl(
             dropout_mask1 = None
     else:
         dropout_mask, dropout_mask1 = None, None
-    # Less than 64KB per feature: enqueue fused kernel
     MAX_FUSED_SIZE = 65536 // x.element_size()
     BLOCK_N = min(MAX_FUSED_SIZE, triton.next_power_of_2(N))
     if N > BLOCK_N:
@@ -244,7 +220,7 @@ def _layer_norm_fwd_impl(
         torch.library.wrap_triton(_layer_norm_fwd_1pass_kernel)[(M,)](
             x,
             out,
-            weight if weight is not None else x,  # unused when HAS_WEIGHT == False
+            weight if weight is not None else x,
             bias,
             residual,
             x1,
@@ -365,21 +341,22 @@ class LayerNormFn:
         residual_out=None,
     ):
         x_shape_og = x.shape
-        # reshape input data into 2D tensor
-        x = maybe_contiguous_lastdim(x.reshape(-1, x.shape[-1]))
+        x = x.reshape(-1, x.shape[-1]).contiguous()
         if residual is not None:
             assert residual.shape == x_shape_og
-            residual = maybe_contiguous_lastdim(residual.reshape(-1, residual.shape[-1]))
+            residual = residual.reshape(-1, residual.shape[-1]).contiguous()
         if x1 is not None:
             assert x1.shape == x_shape_og
             assert rowscale is None, "rowscale is not supported with parallel LayerNorm"
-            x1 = maybe_contiguous_lastdim(x1.reshape(-1, x1.shape[-1]))
-        # weight can be None when elementwise_affine=False for LayerNorm
+            x1 = x1.reshape(-1, x1.shape[-1]).contiguous()
         if weight is not None:
             weight = weight.contiguous()
-        bias = maybe_contiguous(bias)
-        weight1 = maybe_contiguous(weight1)
-        bias1 = maybe_contiguous(bias1)
+        if bias is not None:
+            bias = bias.contiguous()
+        if weight1 is not None:
+            weight1 = weight1.contiguous()
+        if bias1 is not None:
+            bias1 = bias1.contiguous()
         if rowscale is not None:
             rowscale = rowscale.reshape(-1).contiguous()
         residual_dtype = residual.dtype if residual is not None else (torch.float32 if residual_in_fp32 else None)
@@ -413,8 +390,6 @@ class LayerNormFn:
         return y
 
 
-@torch.compiler.disable()
-@torch.compiler.disable()
 def layer_norm_fn(
     x,
     weight,
@@ -502,10 +477,6 @@ def _norm_infer_kernel(
     row = tl.program_id(0)
     X += row * stride_x_row
     Y += row * stride_y_row
-    if HAS_WEIGHT:
-        W += 0
-    if HAS_BIAS:
-        B += 0
     cols = tl.arange(0, BLOCK_N)
     x = tl.load(X + cols, mask=cols < N, other=0.0).to(tl.float32)
     if not IS_RMS_NORM:
@@ -528,11 +499,7 @@ def _norm_infer_kernel(
     tl.store(Y + cols, y, mask=cols < N)
 
 
-@register_custom_op(
-    op_name="telefuser::norm_infer",
-    mutates_args=["out"],
-)
-def _norm_infer_impl(
+def _norm_infer_kernel_call(
     x: torch.Tensor,
     out: torch.Tensor,
     weight: torch.Tensor,
@@ -544,7 +511,7 @@ def _norm_infer_impl(
     has_weight: bool,
     has_bias: bool,
 ) -> None:
-    """Internal implementation for norm_infer, wrapped as custom op."""
+    """Call the norm_infer Triton kernel."""
     BLOCK_N = min(65536 // x.element_size(), triton.next_power_of_2(N))
     num_warps = min(max(BLOCK_N // 256, 1), 8)
     _norm_infer_kernel[(M,)](
@@ -565,7 +532,6 @@ def _norm_infer_impl(
     )
 
 
-@torch.compiler.disable()
 def norm_infer(
     x: torch.Tensor,
     weight: Optional[torch.Tensor],
@@ -606,11 +572,11 @@ def norm_infer(
     if N > BLOCK_N:
         raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
 
-    _norm_infer_impl(
+    _norm_infer_kernel_call(
         x_2d,
         out,
-        weight if weight is not None else x_2d,  # dummy when HAS_WEIGHT=False
-        bias if bias is not None else x_2d,  # dummy when HAS_BIAS=False
+        weight if weight is not None else x_2d,
+        bias if bias is not None else x_2d,
         M,
         N,
         eps,
@@ -621,7 +587,6 @@ def norm_infer(
     return out.view(shape)
 
 
-@torch.compiler.disable()
 def rms_norm_fn(
     x,
     weight,
@@ -679,7 +644,7 @@ def rms_norm_fn(
         prenorm,
         residual_in_fp32,
         zero_centered_weight,
-        True,  # is_rms_norm
+        True,
         return_dropout_mask,
         out_dtype,
         out,

@@ -10,6 +10,7 @@ from loguru import logger
 from telefuser.core.base_model import BaseModel
 from telefuser.core.config import AttentionConfig, AttnImplType, OffloadConfig
 from telefuser.ops.attention import attention as attn_func
+from telefuser.ops.normalization import LayerNorm, RMSNorm
 
 LTX23_DEV_TRANSFORMER_CONFIG = {
     "transformer": {
@@ -670,8 +671,8 @@ class Attention(torch.nn.Module):
         self.heads = heads
         self.dim_head = dim_head
 
-        self.q_norm = torch.nn.RMSNorm(inner_dim, eps=norm_eps)
-        self.k_norm = torch.nn.RMSNorm(inner_dim, eps=norm_eps)
+        self.q_norm = RMSNorm(inner_dim, eps=norm_eps)
+        self.k_norm = RMSNorm(inner_dim, eps=norm_eps)
 
         self.to_q = torch.nn.Linear(query_dim, inner_dim, bias=True)
         self.to_k = torch.nn.Linear(context_dim, inner_dim, bias=True)
@@ -1664,7 +1665,7 @@ class LTXModel(torch.nn.Module):
 
         # Video output components
         self.scale_shift_table = torch.nn.Parameter(torch.empty(2, self.inner_dim))
-        self.norm_out = torch.nn.LayerNorm(self.inner_dim, elementwise_affine=False, eps=norm_eps)
+        self.norm_out = LayerNorm(self.inner_dim, eps=norm_eps, elementwise_affine=False)
         self.proj_out = torch.nn.Linear(self.inner_dim, out_channels)
 
     def _init_audio(
@@ -1692,7 +1693,7 @@ class LTXModel(torch.nn.Module):
 
         # Audio output components
         self.audio_scale_shift_table = torch.nn.Parameter(torch.empty(2, self.audio_inner_dim))
-        self.audio_norm_out = torch.nn.LayerNorm(self.audio_inner_dim, elementwise_affine=False, eps=norm_eps)
+        self.audio_norm_out = LayerNorm(self.audio_inner_dim, eps=norm_eps, elementwise_affine=False)
         self.audio_proj_out = torch.nn.Linear(self.audio_inner_dim, out_channels)
 
     def _init_audio_video(
@@ -1887,7 +1888,7 @@ class LTXModel(torch.nn.Module):
     def _process_output(
         self,
         scale_shift_table: torch.Tensor,
-        norm_out: torch.nn.LayerNorm,
+        norm_out: LayerNorm,
         proj_out: torch.nn.Linear,
         x: torch.Tensor,
         embedded_timestep: torch.Tensor,

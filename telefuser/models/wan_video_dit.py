@@ -29,10 +29,6 @@ from telefuser.distributed.ulysses_comm import (
     ulysses_gather_heads,
     ulysses_scatter_heads,
 )
-from telefuser.kernel.triton import (
-    apply_rotary_embedding,
-    fused_scale_shift,
-)
 from telefuser.offload import (
     AutoWrappedLinear,
     AutoWrappedModule,
@@ -43,7 +39,8 @@ from telefuser.offload.async_offload import AsyncOffloadManager
 from telefuser.ops.attention import MaskMap, SparseAttentionState
 from telefuser.ops.attention import attention as attn_func
 from telefuser.ops.attention import long_context_attention as long_attn_func
-from telefuser.ops.normalization import LayerNorm, RMSNorm, modulate
+from telefuser.ops.normalization import LayerNorm, RMSNorm, fused_scale_shift, modulate
+from telefuser.ops.rotary import apply_rotary_emb
 from telefuser.utils.logging import logger
 
 
@@ -82,8 +79,8 @@ def precompute_freqs_cis(dim: int, end: int = 1024, theta: float = 10000.0) -> t
 def rope_apply(x: torch.Tensor, freqs_cos: torch.Tensor, freqs_sin: torch.Tensor, num_heads: int) -> torch.Tensor:
     """Apply RoPE (Rotary Position Embedding).
 
-    Uses Triton kernel when on CUDA for better performance.
-    The apply_rotary_embedding is registered as a custom op for torch.compile compatibility.
+    Uses ops.rotary.apply_rotary_emb which automatically selects the optimal
+    implementation based on compile state and platform.
 
     Args:
         x: Input tensor [B, S, D] or [B, S, num_heads * head_dim]
@@ -95,8 +92,8 @@ def rope_apply(x: torch.Tensor, freqs_cos: torch.Tensor, freqs_sin: torch.Tensor
         Tensor with RoPE applied, same shape as input
     """
     x = rearrange(x, "b s (n d) -> b s n d", n=num_heads)
-    # apply_rotary_embedding expects [batch, seq_len, num_heads, head_size]
-    x_rope = apply_rotary_embedding(x, freqs_cos, freqs_sin)
+    # apply_rotary_emb expects x: [B, S, H, D], freqs: (cos, sin)
+    x_rope = apply_rotary_emb(x, (freqs_cos, freqs_sin))
     return x_rope.flatten(2)
 
 

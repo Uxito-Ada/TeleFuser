@@ -28,22 +28,32 @@ def sparse_sageattn(
     v: torch.Tensor,
     mask_id: torch.Tensor | None = None,
     is_causal: bool = False,
-    tensor_layout: str = "HND",
 ):
+    """Sparse SageAttention with INT8 quantization.
+
+    Args:
+        q: Query tensor [B, H, L, C] in HND format
+        k: Key tensor [B, H, L, C] in HND format
+        v: Value tensor [B, H, L, C] in HND format
+        mask_id: Sparse mask ID tensor
+        is_causal: Whether to use causal attention
+
+    Returns:
+        Output tensor
+    """
     if mask_id is None:
         mask_id = torch.ones(
             (q.shape[0], q.shape[1], (q.shape[2] + 128 - 1) // 128, (q.shape[3] + 64 - 1) // 64),
             dtype=torch.int8,
             device=q.device,
-        )  # TODO
+        )
 
     output_dtype = q.dtype
     if output_dtype == torch.bfloat16 or output_dtype == torch.float32:
         v = v.to(torch.float16)
 
-    seq_dim = 1 if tensor_layout == "NHD" else 2
-    km = k.mean(dim=seq_dim, keepdim=True)
-    q_int8, q_scale, k_int8, k_scale = per_block_int8(q, k, km=km, tensor_layout=tensor_layout)
+    km = k.mean(dim=2, keepdim=True)
+    q_int8, q_scale, k_int8, k_scale = per_block_int8(q, k, km=km)
 
     o = sparse_sageattn_fwd(
         q_int8,
@@ -53,10 +63,6 @@ def sparse_sageattn(
         q_scale,
         k_scale,
         is_causal=is_causal,
-        tensor_layout=tensor_layout,
         output_dtype=output_dtype,
     )
     return o
-
-
-# flops = 4 * q.size(0) * q.size(1) * q.size(2)**2 * q.size(3)  / (2 if is_causal else 1)
