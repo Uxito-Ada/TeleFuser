@@ -11,6 +11,7 @@ from telefuser.metrics import with_metrics
 from telefuser.models.flashvsr_dit import FlashVSRModel
 from telefuser.utils.logging import logger
 from telefuser.utils.profiler import ProfilingContext4Debug
+from telefuser.utils.torch_compile import apply_compile_config
 
 
 class DitDenoisingStage(BaseStage):
@@ -31,6 +32,13 @@ class DitDenoisingStage(BaseStage):
         self.model_names = ["dit"]
         self.cur_process_idx = 0
         self.pre_LQ_video_cache = None
+
+        # Handle torch.compile for single GPU mode
+        parallel_cfg = model_runtime_config.parallel_config
+        if parallel_cfg.world_size == 1 and model_runtime_config.compile_config.enabled:
+            apply_compile_config(model_runtime_config.compile_config)
+            logger.info("enable torch.compile for dit")
+            self.dit.compile()
 
     def generate_noise(
         self, shape: tuple, seed: int | None = None, device: str = "cpu", dtype: torch.dtype = torch.float16
@@ -299,5 +307,9 @@ class DitDenoisingStage(BaseStage):
         self.dit.LQ_proj_in.set_parallelism(parallel_cfg.world_size)
         if parallel_cfg.sp_ulysses_degree > 1:
             self.dit.enable_usp()
-        if self.model_runtime_config.compile:
-            torch.compile(self.dit)
+
+        # Handle torch.compile for distributed mode
+        if self.model_runtime_config.compile_config.enabled:
+            apply_compile_config(self.model_runtime_config.compile_config)
+            logger.info("enable torch.compile for dit")
+            self.dit.compile()

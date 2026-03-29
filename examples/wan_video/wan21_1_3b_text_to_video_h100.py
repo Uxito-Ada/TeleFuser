@@ -66,7 +66,7 @@ def get_pipeline(parallelism=1, model_root="/dev/shm/Wan2.1-T2V-1.3B/"):
     pipe_config.enable_clip_stage = True
     pipe_config.enable_vfi = PPL_CONFIG["enable_vfi"]
     pipe_config.enable_metrics = True
-    pipe_config.dit_config.compile = True
+    pipe_config.dit_config.compile_config.enabled = True
     if parallelism > 1:
         # Configure parallel based on cfg_scale
         # For cfg_scale > 1: cfg_degree=2, sp_ulysses_degree=parallelism//2

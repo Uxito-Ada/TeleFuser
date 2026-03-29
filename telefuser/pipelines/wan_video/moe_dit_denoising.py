@@ -17,7 +17,7 @@ from telefuser.platforms import current_platform
 from telefuser.utils.logging import logger
 from telefuser.utils.lora_loader import LoRALoader
 from telefuser.utils.profiler import ProfilingContext4Debug
-from telefuser.utils.torch_compile import set_compile_configs
+from telefuser.utils.torch_compile import apply_compile_config
 
 
 class MoeDitDenoisingStage(BaseStage):
@@ -87,15 +87,17 @@ class MoeDitDenoisingStage(BaseStage):
                 logger.info("enable async cpu offload for dit low")
                 self.dit_low.enable_async_offload(self.device, dit_low_runtime_config.offload_config)
 
-        # Handle torch.compile - only compile in __init__ if single GPU mode
+        # Handle torch.compile for single GPU mode
         parallel_cfg = dit_high_runtime_config.parallel_config
-        if parallel_cfg.world_size == 1 and (dit_high_runtime_config.compile or dit_low_runtime_config.compile):
-            set_compile_configs(descent_tuning=True, compute_comm_overlap=False)
-            if dit_high_runtime_config.compile:
-                logger.info("enable torch.compile for dit_high (single GPU mode)")
+        if parallel_cfg.world_size == 1 and (
+            dit_high_runtime_config.compile_config.enabled or dit_low_runtime_config.compile_config.enabled
+        ):
+            apply_compile_config(dit_high_runtime_config.compile_config)
+            if dit_high_runtime_config.compile_config.enabled:
+                logger.info("enable torch.compile for dit_high")
                 self.dit_high.compile()
-            if dit_low_runtime_config.compile:
-                logger.info("enable torch.compile for dit_low (single GPU mode)")
+            if dit_low_runtime_config.compile_config.enabled:
+                logger.info("enable torch.compile for dit_low")
                 self.dit_low.compile()
 
     def load_loras(self):
@@ -290,15 +292,12 @@ class MoeDitDenoisingStage(BaseStage):
                 self.dit_low.cpu()
                 current_platform.empty_cache()
 
-        # Handle torch.compile after parallel setup
-        parallel_cfg = self.dit_high_runtime_config.parallel_config
-        if parallel_cfg.world_size > 1 and (
-            self.dit_high_runtime_config.compile or self.dit_low_runtime_config.compile
-        ):
-            set_compile_configs(descent_tuning=True, compute_comm_overlap=True)
-            if self.dit_high_runtime_config.compile:
-                logger.info("enable torch.compile for dit_high (parallel mode)")
+        # Handle torch.compile for distributed mode
+        if self.dit_high_runtime_config.compile_config.enabled or self.dit_low_runtime_config.compile_config.enabled:
+            apply_compile_config(self.dit_high_runtime_config.compile_config)
+            if self.dit_high_runtime_config.compile_config.enabled:
+                logger.info("enable torch.compile for dit_high")
                 self.dit_high.compile()
-            if self.dit_low_runtime_config.compile:
-                logger.info("enable torch.compile for dit_low (parallel mode)")
+            if self.dit_low_runtime_config.compile_config.enabled:
+                logger.info("enable torch.compile for dit_low")
                 self.dit_low.compile()

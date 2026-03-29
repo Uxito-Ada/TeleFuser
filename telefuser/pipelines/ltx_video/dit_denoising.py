@@ -17,7 +17,7 @@ from telefuser.models.ltx_video_vae import VIDEO_SCALE_FACTORS, SpatioTemporalSc
 from telefuser.schedulers.flow_match import FlowMatchScheduler
 from telefuser.utils.lora_loader import LoRALoader
 from telefuser.utils.profiler import ProfilingContext4Debug
-from telefuser.utils.torch_compile import set_compile_configs
+from telefuser.utils.torch_compile import apply_compile_config
 
 STAGE_2_DISTILLED_SIGMA_VALUES = [0.909375, 0.725, 0.421875, 0.0]
 VIDEO_LATENT_CHANNELS = 128
@@ -568,11 +568,10 @@ class DitDenoisingStage(BaseStage):
         self.audio_patchifier = AudioPatchifier(patch_size=1)
         self._lora_applied = False
 
-        # Handle torch.compile - only compile in __init__ if single GPU mode
-        parallel_cfg = model_runtime_config.parallel_config
-        if model_runtime_config.compile and parallel_cfg.world_size == 1:
-            set_compile_configs(descent_tuning=True, compute_comm_overlap=False)
-            logger.info("enable torch.compile for ltx dit (single GPU mode)")
+        # Handle torch.compile
+        if model_runtime_config.compile_config.enabled:
+            apply_compile_config(model_runtime_config.compile_config)
+            logger.info("enable torch.compile for ltx dit")
             self.dit.compile()
 
     def _maybe_apply_loras(self) -> None:

@@ -17,7 +17,7 @@ from telefuser.schedulers.flow_match import FlowMatchScheduler
 from telefuser.utils.logging import logger
 from telefuser.utils.lora_loader import LoRALoader
 from telefuser.utils.profiler import ProfilingContext4Debug
-from telefuser.utils.torch_compile import set_compile_configs
+from telefuser.utils.torch_compile import apply_compile_config
 
 
 class DitDenoisingStage(BaseStage):
@@ -40,11 +40,11 @@ class DitDenoisingStage(BaseStage):
         if self.model_runtime_config.offload_config.offload_type == WeightOffloadType.ASYNC_CPU_OFFLOAD:
             self.dit.enable_async_offload(self.device, offload_config=self.model_runtime_config.offload_config)
 
-        # Handle torch.compile - only compile in __init__ if single GPU mode
+        # Handle torch.compile for single GPU mode
         parallel_cfg = model_runtime_config.parallel_config
-        if model_runtime_config.compile and parallel_cfg.world_size == 1:
-            set_compile_configs(descent_tuning=True, compute_comm_overlap=False)
-            logger.info("enable torch.compile for dit (single GPU mode)")
+        if parallel_cfg.world_size == 1 and model_runtime_config.compile_config.enabled:
+            apply_compile_config(model_runtime_config.compile_config)
+            logger.info("enable torch.compile for dit")
             self.dit.compile()
 
         self.model_names = ["dit"]
@@ -256,8 +256,8 @@ class DitDenoisingStage(BaseStage):
                 self.dit.cpu()
                 current_platform.empty_cache()
 
-        # Handle torch.compile after parallel setup
-        if self.model_runtime_config.compile and parallel_cfg.world_size > 1:
-            set_compile_configs(descent_tuning=True, compute_comm_overlap=True)
-            logger.info("enable torch.compile for dit (parallel mode)")
+        # Handle torch.compile for distributed mode
+        if self.model_runtime_config.compile_config.enabled:
+            apply_compile_config(self.model_runtime_config.compile_config)
+            logger.info("enable torch.compile for dit")
             self.dit.compile()

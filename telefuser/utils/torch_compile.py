@@ -2,8 +2,13 @@
 
 from __future__ import annotations
 
+from typing import TYPE_CHECKING
+
 import torch
 import torch.distributed as dist
+
+if TYPE_CHECKING:
+    from telefuser.core.config import CompileConfig
 
 
 def set_compile_configs(
@@ -15,6 +20,7 @@ def set_compile_configs(
     capture_scalar_outputs: bool = False,
     capture_dynamic_output_shape_ops: bool = False,
     epilogue_prologue_fusion: bool = False,
+    recompile_limit: int = 1024,
 ):
     """Configure torch.compile settings for optimal performance.
 
@@ -27,10 +33,11 @@ def set_compile_configs(
         capture_scalar_outputs: Capture scalar outputs in compiled regions
         capture_dynamic_output_shape_ops: Capture dynamic shape operations
         epilogue_prologue_fusion: Enable epilogue/prologue fusion optimizations
+        recompile_limit: Max recompilations before caching (default: 1024)
     """
-    # Alway increase recompile_limit for dynamic shape compilation
-    torch._dynamo.config.recompile_limit = 1024  # default is 8
-    torch._dynamo.config.accumulated_recompile_limit = 8192  # default is 256
+    # Always increase recompile_limit for dynamic shape compilation
+    torch._dynamo.config.recompile_limit = recompile_limit
+    torch._dynamo.config.accumulated_recompile_limit = recompile_limit * 8
     # Handle compiler caches
     # https://github.com/vllm-project/vllm/blob/23baa2180b0ebba5ae94073ba9b8e93f88b75486/vllm/compilation/compiler_interface.py#L270
     torch._inductor.config.fx_graph_cache = True
@@ -88,3 +95,21 @@ def set_compile_configs(
         torch._inductor.config.use_fast_math = use_fast_math
     if hasattr(torch._inductor.config, "cuda.use_fast_math"):
         torch._inductor.config.cuda.use_fast_math = use_fast_math
+
+
+def apply_compile_config(config: "CompileConfig") -> None:
+    """Apply CompileConfig to global torch.compile settings.
+
+    This function configures torch._dynamo and torch._inductor settings
+    based on the provided CompileConfig.
+
+    Args:
+        config: CompileConfig instance with desired settings
+    """
+    set_compile_configs(
+        descent_tuning=config.descent_tuning,
+        cuda_graphs=config.cuda_graphs,
+        compute_comm_overlap=config.compute_comm_overlap,
+        epilogue_prologue_fusion=config.epilogue_fusion,
+        recompile_limit=config.recompile_limit,
+    )

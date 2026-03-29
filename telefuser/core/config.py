@@ -230,6 +230,64 @@ class AttentionConfig:
 
 
 @dataclass
+class CompileConfig:
+    """Configuration for torch.compile optimization.
+
+    This class provides fine-grained control over torch.compile behavior,
+
+    Attributes:
+        enabled: Whether to enable torch.compile
+        mode: Compilation mode - "blocks" (recommended), "full", or "blocks_pp"
+        fullgraph: Require full graph compilation (more restrictive but faster)
+        dynamic: Support dynamic shapes (None = auto-detect)
+        recompile_limit: Max recompilations before caching (default: 1024)
+        max_autotune: Enable max-autotune mode for better performance
+        cuda_graphs: Enable CUDA graphs (requires static shapes)
+        compute_comm_overlap: Enable compute-communication overlap for distributed
+        descent_tuning: Enable coordinate descent tuning for Triton kernels
+        epilogue_fusion: Enable epilogue/prologue fusion optimizations
+    """
+
+    enabled: bool = False
+    mode: str = "blocks"  # "blocks", "full", "blocks_pp"
+    fullgraph: bool = False
+    dynamic: bool | None = None  # None = auto, True/False = explicit
+    recompile_limit: int = 1024
+    max_autotune: bool = True
+    cuda_graphs: bool = False
+    compute_comm_overlap: bool = True
+    descent_tuning: bool = False
+    epilogue_fusion: bool = False
+
+    def get_compile_kwargs(self) -> dict:
+        """Get torch.compile kwargs from this config.
+
+        Returns:
+            Dictionary of kwargs for torch.compile()
+        """
+        kwargs = {
+            "fullgraph": self.fullgraph,
+            "dynamic": self.dynamic,
+        }
+        if self.max_autotune:
+            kwargs["mode"] = "max-autotune-no-cudagraphs"
+        return kwargs
+
+    def validate(self) -> None:
+        """Validate configuration values.
+
+        Raises:
+            ValueError: If configuration is invalid
+        """
+        valid_modes = {"blocks", "full", "blocks_pp"}
+        if self.mode not in valid_modes:
+            raise ValueError(f"Invalid compile mode: {self.mode}. Must be one of {valid_modes}")
+
+        if self.fullgraph and self.dynamic:
+            raise ValueError("fullgraph=True and dynamic=True are incompatible")
+
+
+@dataclass
 class ModelRuntimeConfig:
     """Complete runtime configuration for model execution."""
 
@@ -241,7 +299,7 @@ class ModelRuntimeConfig:
     attention_config: AttentionConfig = field(
         default_factory=lambda: AttentionConfig.dense_attention(AttnImplType.TORCH_SDPA)
     )
-    compile: bool = False  # Enable torch.compile
+    compile_config: CompileConfig = field(default_factory=CompileConfig)
     parallel_config: ParallelConfig = field(default_factory=ParallelConfig)
     ray_config: RayConfig = field(default_factory=RayConfig)
     feature_cache_config: FeatureCacheConfig = field(default_factory=FeatureCacheConfig)

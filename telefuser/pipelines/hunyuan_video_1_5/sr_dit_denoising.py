@@ -18,7 +18,7 @@ from telefuser.core.base_stage import BaseStage, with_model_offload
 from telefuser.core.config import ModelRuntimeConfig
 from telefuser.core.module_manager import ModuleManager
 from telefuser.utils.logging import logger
-from telefuser.utils.torch_compile import set_compile_configs
+from telefuser.utils.torch_compile import apply_compile_config
 
 
 def _expand_dims(tensor: torch.Tensor, ndim: int) -> torch.Tensor:
@@ -72,11 +72,11 @@ class HunyuanVideoSRDenoisingStage(BaseStage):
         self.model_names = ["dit"]
         # Note: upsampler is handled by separate HunyuanVideoUpsamplerStage in pipeline
 
-        # Handle torch.compile - only compile in __init__ if single GPU mode
+        # Handle torch.compile for single GPU mode
         parallel_cfg = model_runtime_config.parallel_config
-        if parallel_cfg.world_size == 1 and model_runtime_config.compile:
-            set_compile_configs(descent_tuning=True, compute_comm_overlap=False)
-            logger.info("enable torch.compile for hunyuan video sr dit (single GPU mode)")
+        if parallel_cfg.world_size == 1 and model_runtime_config.compile_config.enabled:
+            apply_compile_config(model_runtime_config.compile_config)
+            logger.info("enable torch.compile for dit")
             self.dit.compile()
 
     def _add_noise_to_lq(self, lq_latents: torch.Tensor) -> torch.Tensor:
@@ -359,10 +359,8 @@ class HunyuanVideoSRDenoisingStage(BaseStage):
         Note: HunyuanVideoDiT does not currently support USP or FSDP.
         This method is provided for future expansion and torch.compile support.
         """
-        parallel_cfg = self.model_runtime_config.parallel_config
-
-        # Handle torch.compile after parallel setup (for future distributed support)
-        if parallel_cfg.world_size > 1 and self.model_runtime_config.compile:
-            set_compile_configs(descent_tuning=True, compute_comm_overlap=True)
-            logger.info("enable torch.compile for hunyuan video sr dit (parallel mode)")
+        # Handle torch.compile for distributed mode
+        if self.model_runtime_config.compile_config.enabled:
+            apply_compile_config(self.model_runtime_config.compile_config)
+            logger.info("enable torch.compile for dit")
             self.dit.compile()
