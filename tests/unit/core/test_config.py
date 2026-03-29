@@ -127,7 +127,7 @@ class TestModelRuntimeConfig:
         config = ModelRuntimeConfig()
         assert config.torch_dtype == torch.bfloat16
         assert config.attention_config.attn_impl == AttnImplType.TORCH_SDPA
-        assert config.compile is False
+        assert config.compile_config.enabled is False
         assert isinstance(config.offload_config, OffloadConfig)
 
     @pytest.mark.parametrize("dtype", [torch.float16, torch.float32, torch.bfloat16])

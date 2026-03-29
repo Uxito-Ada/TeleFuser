@@ -14,6 +14,7 @@ from telefuser.ops.activations import (
     SwiGLU,
     get_activation,
 )
+from tests.conftest import requires_cuda
 
 
 class TestGetActivation:
@@ -94,10 +95,11 @@ class TestGELU:
 class TestGEGLU:
     """Test GEGLU activation module."""
 
+    @requires_cuda
     def test_forward_computation(self):
         """Test forward produces correct output shape."""
-        geglu = GEGLU(dim_in=64, dim_out=128)
-        x = torch.randn(2, 10, 64)
+        geglu = GEGLU(dim_in=64, dim_out=128).cuda()
+        x = torch.randn(2, 10, 64, device="cuda")
 
         output = geglu(x)
 
@@ -109,10 +111,11 @@ class TestGEGLU:
 class TestSwiGLU:
     """Test SwiGLU activation module."""
 
+    @requires_cuda
     def test_forward_computation(self):
         """Test forward produces correct output."""
-        swiglu = SwiGLU(dim_in=64, dim_out=128)
-        x = torch.randn(2, 10, 64)
+        swiglu = SwiGLU(dim_in=64, dim_out=128).cuda()
+        x = torch.randn(2, 10, 64, device="cuda")
 
         output = swiglu(x)
 

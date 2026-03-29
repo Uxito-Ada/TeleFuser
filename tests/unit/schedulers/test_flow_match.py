@@ -198,7 +198,7 @@ class TestSetTimestepsLTX:
 
     def test_default_parameters(self):
         """Test default LTX schedule shape."""
-        sigmas, timesteps = FlowMatchScheduler.set_timesteps_ltx()
+        sigmas, timesteps = FlowMatchScheduler.set_timesteps_ltx2()
 
         assert len(sigmas) == 101
         assert len(timesteps) == 100
@@ -210,8 +210,8 @@ class TestSetTimestepsLTX:
         latent_small = torch.zeros(1, 128, 4, 16, 16)
         latent_large = torch.zeros(1, 128, 8, 32, 32)
 
-        sigmas_small, _ = FlowMatchScheduler.set_timesteps_ltx(latent=latent_small)
-        sigmas_large, _ = FlowMatchScheduler.set_timesteps_ltx(latent=latent_large)
+        sigmas_small, _ = FlowMatchScheduler.set_timesteps_ltx2(latent=latent_small)
+        sigmas_large, _ = FlowMatchScheduler.set_timesteps_ltx2(latent=latent_large)
 
         assert not torch.allclose(sigmas_small, sigmas_large)
 
