@@ -224,6 +224,12 @@ Refinement pipeline supports multiple modes with different attention mechanisms 
 - **LoRA Isolation**: Verifies no LoRA interference in base generation
 - **Determinism**: Validates reproducibility with fixed seed
 
+### Refinement (T2V 480p → 720p)
+
+| Config | Device | Base Steps | Refine Steps | Frames | Base Resolution | Refine Resolution | Time (s) | Max VRAM (GB) |
+|--------|--------|------------|--------------|--------|-----------------|-------------------|----------|---------------|
+| T2V+Refine | H100*1 | 50 | 50 | 93 | 832x480 | 1280x720 | TBD | TBD |
+
 ## Notes
 
 - LongCat-Video is optimized for long-form video generation
