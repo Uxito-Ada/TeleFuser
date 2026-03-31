@@ -66,11 +66,7 @@ def get_pipeline(parallelism=1, model_root=PPL_CONFIG["model_root"]):
     pipe = Wan22VideoPipeline(device="cuda", torch_dtype=torch.bfloat16)
     pipe_config = Wan22VideoPipelineConfig()
     pipe_config.dit_high_config.attention_config = AttentionConfig.dense_attention(PPL_CONFIG["attn_impl"])
-    pipe_config.dit_high_config.offload_config.offload_type = WeightOffloadType.MODEL_CPU_OFFLOAD
     pipe_config.dit_low_config.attention_config = AttentionConfig.dense_attention(PPL_CONFIG["attn_impl"])
-    pipe_config.dit_low_config.offload_config.offload_type = WeightOffloadType.MODEL_CPU_OFFLOAD
-    pipe_config.vae_config.offload_config.offload_type = WeightOffloadType.MODEL_CPU_OFFLOAD
-    pipe_config.text_encoding_config.offload_config.offload_type = WeightOffloadType.MODEL_CPU_OFFLOAD
     pipe_config.sample_solver = PPL_CONFIG["sample_solver"]
     if parallelism > 1:
         # Configure parallel based on cfg_scale
