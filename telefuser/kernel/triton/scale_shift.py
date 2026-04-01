@@ -212,33 +212,35 @@ def fused_scale_shift(
     else:
         # Handle 2D/3D scale/shift
         if scale.dim() == 0 or (scale.dim() == 1 and scale.numel() == 1):
-            scale_blc = scale.reshape(1)
+            scale_blc = scale.reshape(1).contiguous()
         elif scale.dim() == 2:
-            scale_blc = scale[:, None, :]
+            scale_blc = scale[:, None, :].contiguous()
         elif scale.dim() == 3:
-            scale_blc = scale
+            scale_blc = scale.contiguous()
         else:
             raise ValueError("scale must be 0D/1D(1)/2D/3D or 4D")
 
         if shift.dim() == 0 or (shift.dim() == 1 and shift.numel() == 1):
-            shift_blc = shift.reshape(1)
+            shift_blc = shift.reshape(1).contiguous()
         elif shift.dim() == 2:
-            shift_blc = shift[:, None, :]
+            shift_blc = shift[:, None, :].contiguous()
         elif shift.dim() == 3:
-            shift_blc = shift
+            shift_blc = shift.contiguous()
         else:
-            shift_blc = shift
+            shift_blc = shift.contiguous()
 
         need_scale_scalar = scale_blc.dim() == 1 and scale_blc.numel() == 1
         need_shift_scalar = shift_blc.dim() == 1 and shift_blc.numel() == 1
 
         if not need_scale_scalar:
+            # Use stride-based broadcasting - expand() creates zero-copy view
             scale_exp = scale_blc.expand(B, L, C)
             s_sb, s_sl, s_sc = scale_exp.stride()
         else:
             s_sb = s_sl = s_sc = 0
 
         if not need_shift_scalar:
+            # Use stride-based broadcasting - expand() creates zero-copy view
             shift_exp = shift_blc.expand(B, L, C)
             sh_sb, sh_sl, sh_sc = shift_exp.stride()
         else:
@@ -276,6 +278,138 @@ def fused_scale_shift(
             num_stages=2,
         )
     return output
+
+
+@triton.jit
+def _scale_shift_gate_select_core(
+    x_hat,
+    cols,
+    mask,
+    batch_idx,
+    seq_idx,
+    index_ptr,
+    scale0_ptr,
+    shift0_ptr,
+    gate0_ptr,
+    scale1_ptr,
+    shift1_ptr,
+    gate1_ptr,
+    stride_i_b,
+    stride_i_l,
+    stride_s0_b,
+    stride_s0_c,
+    stride_sh0_b,
+    stride_sh0_c,
+    stride_g0_b,
+    stride_g0_c,
+    stride_s1_b,
+    stride_s1_c,
+    stride_sh1_b,
+    stride_sh1_c,
+    stride_g1_b,
+    stride_g1_c,
+):
+    """Shared scale/shift/gate selection logic.
+
+    Args:
+        x_hat: Normalized input values
+        cols: Column offsets
+        mask: Valid column mask
+        batch_idx: Batch index
+        seq_idx: Sequence index
+        Various pointers and strides for scale/shift/gate tensors
+
+    Returns:
+        Tuple of (output values, gate values)
+    """
+    idx = tl.load(index_ptr + batch_idx * stride_i_b + seq_idx * stride_i_l).to(tl.int1)
+
+    scale0 = tl.load(
+        scale0_ptr + batch_idx * stride_s0_b + cols * stride_s0_c,
+        mask=mask,
+        other=0.0,
+    ).to(tl.float32)
+    shift0 = tl.load(
+        shift0_ptr + batch_idx * stride_sh0_b + cols * stride_sh0_c,
+        mask=mask,
+        other=0.0,
+    ).to(tl.float32)
+    gate0 = tl.load(
+        gate0_ptr + batch_idx * stride_g0_b + cols * stride_g0_c,
+        mask=mask,
+        other=0.0,
+    )
+
+    scale1 = tl.load(
+        scale1_ptr + batch_idx * stride_s1_b + cols * stride_s1_c,
+        mask=mask,
+        other=0.0,
+    ).to(tl.float32)
+    shift1 = tl.load(
+        shift1_ptr + batch_idx * stride_sh1_b + cols * stride_sh1_c,
+        mask=mask,
+        other=0.0,
+    ).to(tl.float32)
+    gate1 = tl.load(
+        gate1_ptr + batch_idx * stride_g1_b + cols * stride_g1_c,
+        mask=mask,
+        other=0.0,
+    )
+
+    scale = tl.where(idx, scale1, scale0)
+    shift = tl.where(idx, shift1, shift0)
+    gate = tl.where(idx, gate1, gate0)
+    y = x_hat * (1.0 + scale) + shift
+
+    return y, gate
+
+
+@triton.jit
+def _compute_layernorm(
+    x,
+    cols,
+    mask,
+    inner_dim,
+    eps,
+    weight_ptr,
+    bias_ptr,
+    stride_w,
+    stride_b,
+    HAS_WEIGHT: tl.constexpr,
+    HAS_BIAS: tl.constexpr,
+):
+    """Shared LayerNorm computation.
+
+    Args:
+        x: Input values
+        cols: Column offsets
+        mask: Valid column mask
+        inner_dim: Inner dimension size
+        eps: Epsilon for numerical stability
+        weight_ptr: Weight pointer
+        bias_ptr: Bias pointer
+        stride_w: Weight stride
+        stride_b: Bias stride
+        HAS_WEIGHT: Whether weight exists
+        HAS_BIAS: Whether bias exists
+
+    Returns:
+        Normalized values (x_hat)
+    """
+    mean = tl.sum(x, axis=0) / inner_dim
+    xbar = tl.where(mask, x - mean, 0.0)
+    var = tl.sum(xbar * xbar, axis=0) / inner_dim
+    rstd = tl.rsqrt(var + eps)
+    x_hat = (x - mean) * rstd
+
+    if HAS_WEIGHT:
+        w = tl.load(weight_ptr + cols * stride_w, mask=mask, other=1.0).to(tl.float32)
+        x_hat = x_hat * w
+    if HAS_BIAS:
+        b = tl.load(bias_ptr + cols * stride_b, mask=mask, other=0.0).to(tl.float32)
+        x_hat = x_hat + b
+
+    return x_hat
 
 
 @triton.jit
@@ -332,59 +466,54 @@ def _fused_layernorm_scale_shift_gate_select01_kernel(
     gate_row_ptr = gate_out_ptr + row * stride_go_row
 
     x = tl.load(x_row_ptr + cols, mask=mask, other=0.0).to(tl.float32)
-    mean = tl.sum(x, axis=0) / inner_dim
-    xbar = tl.where(mask, x - mean, 0.0)
-    var = tl.sum(xbar * xbar, axis=0) / inner_dim
-    rstd = tl.rsqrt(var + eps)
-    x_hat = (x - mean) * rstd
 
-    if HAS_WEIGHT:
-        w = tl.load(weight_ptr + cols * stride_w, mask=mask, other=1.0).to(tl.float32)
-        x_hat = x_hat * w
-    if HAS_BIAS:
-        b = tl.load(bias_ptr + cols * stride_b, mask=mask, other=0.0).to(tl.float32)
-        x_hat = x_hat + b
+    # Use shared LayerNorm computation
+    x_hat = _compute_layernorm(
+        x,
+        cols,
+        mask,
+        inner_dim,
+        eps,
+        weight_ptr,
+        bias_ptr,
+        stride_w,
+        stride_b,
+        HAS_WEIGHT,
+        HAS_BIAS,
+    )
 
     batch_idx = row // seq_len
     seq_idx = row % seq_len
-    idx = tl.load(index_ptr + batch_idx * stride_i_b + seq_idx * stride_i_l).to(tl.int1)
 
-    scale0 = tl.load(
-        scale0_ptr + batch_idx * stride_s0_b + cols * stride_s0_c,
-        mask=mask,
-        other=0.0,
-    ).to(tl.float32)
-    shift0 = tl.load(
-        shift0_ptr + batch_idx * stride_sh0_b + cols * stride_sh0_c,
-        mask=mask,
-        other=0.0,
-    ).to(tl.float32)
-    gate0 = tl.load(
-        gate0_ptr + batch_idx * stride_g0_b + cols * stride_g0_c,
-        mask=mask,
-        other=0.0,
+    # Use shared scale/shift/gate selection
+    y, gate = _scale_shift_gate_select_core(
+        x_hat,
+        cols,
+        mask,
+        batch_idx,
+        seq_idx,
+        index_ptr,
+        scale0_ptr,
+        shift0_ptr,
+        gate0_ptr,
+        scale1_ptr,
+        shift1_ptr,
+        gate1_ptr,
+        stride_i_b,
+        stride_i_l,
+        stride_s0_b,
+        stride_s0_c,
+        stride_sh0_b,
+        stride_sh0_c,
+        stride_g0_b,
+        stride_g0_c,
+        stride_s1_b,
+        stride_s1_c,
+        stride_sh1_b,
+        stride_sh1_c,
+        stride_g1_b,
+        stride_g1_c,
     )
-
-    scale1 = tl.load(
-        scale1_ptr + batch_idx * stride_s1_b + cols * stride_s1_c,
-        mask=mask,
-        other=0.0,
-    ).to(tl.float32)
-    shift1 = tl.load(
-        shift1_ptr + batch_idx * stride_sh1_b + cols * stride_sh1_c,
-        mask=mask,
-        other=0.0,
-    ).to(tl.float32)
-    gate1 = tl.load(
-        gate1_ptr + batch_idx * stride_g1_b + cols * stride_g1_c,
-        mask=mask,
-        other=0.0,
-    )
-
-    scale = tl.where(idx, scale1, scale0)
-    shift = tl.where(idx, shift1, shift0)
-    gate = tl.where(idx, gate1, gate0)
-    y = x_hat * (1.0 + scale) + shift
 
     tl.store(out_row_ptr + cols, y, mask=mask)
     tl.store(gate_row_ptr + cols, gate, mask=mask)
@@ -458,59 +587,53 @@ def _fused_residual_layernorm_scale_shift_gate_select01_kernel(
     residual_out = residual + residual_gate * x
     tl.store(res_out_row_ptr + cols, residual_out, mask=mask)
 
-    mean = tl.sum(residual_out, axis=0) / inner_dim
-    xbar = tl.where(mask, residual_out - mean, 0.0)
-    var = tl.sum(xbar * xbar, axis=0) / inner_dim
-    rstd = tl.rsqrt(var + eps)
-    x_hat = (residual_out - mean) * rstd
-
-    if HAS_WEIGHT:
-        w = tl.load(weight_ptr + cols * stride_w, mask=mask, other=1.0).to(tl.float32)
-        x_hat = x_hat * w
-    if HAS_BIAS:
-        b = tl.load(bias_ptr + cols * stride_b, mask=mask, other=0.0).to(tl.float32)
-        x_hat = x_hat + b
+    # Use shared LayerNorm computation
+    x_hat = _compute_layernorm(
+        residual_out,
+        cols,
+        mask,
+        inner_dim,
+        eps,
+        weight_ptr,
+        bias_ptr,
+        stride_w,
+        stride_b,
+        HAS_WEIGHT,
+        HAS_BIAS,
+    )
 
     batch_idx = row // seq_len
     seq_idx = row % seq_len
-    idx = tl.load(index_ptr + batch_idx * stride_i_b + seq_idx * stride_i_l).to(tl.int1)
 
-    scale0 = tl.load(
-        scale0_ptr + batch_idx * stride_s0_b + cols * stride_s0_c,
-        mask=mask,
-        other=0.0,
-    ).to(tl.float32)
-    shift0 = tl.load(
-        shift0_ptr + batch_idx * stride_sh0_b + cols * stride_sh0_c,
-        mask=mask,
-        other=0.0,
-    ).to(tl.float32)
-    gate0 = tl.load(
-        gate0_ptr + batch_idx * stride_g0_b + cols * stride_g0_c,
-        mask=mask,
-        other=0.0,
+    # Use shared scale/shift/gate selection
+    y, gate = _scale_shift_gate_select_core(
+        x_hat,
+        cols,
+        mask,
+        batch_idx,
+        seq_idx,
+        index_ptr,
+        scale0_ptr,
+        shift0_ptr,
+        gate0_ptr,
+        scale1_ptr,
+        shift1_ptr,
+        gate1_ptr,
+        stride_i_b,
+        stride_i_l,
+        stride_s0_b,
+        stride_s0_c,
+        stride_sh0_b,
+        stride_sh0_c,
+        stride_g0_b,
+        stride_g0_c,
+        stride_s1_b,
+        stride_s1_c,
+        stride_sh1_b,
+        stride_sh1_c,
+        stride_g1_b,
+        stride_g1_c,
     )
-
-    scale1 = tl.load(
-        scale1_ptr + batch_idx * stride_s1_b + cols * stride_s1_c,
-        mask=mask,
-        other=0.0,
-    ).to(tl.float32)
-    shift1 = tl.load(
-        shift1_ptr + batch_idx * stride_sh1_b + cols * stride_sh1_c,
-        mask=mask,
-        other=0.0,
-    ).to(tl.float32)
-    gate1 = tl.load(
-        gate1_ptr + batch_idx * stride_g1_b + cols * stride_g1_c,
-        mask=mask,
-        other=0.0,
-    )
-
-    scale = tl.where(idx, scale1, scale0)
-    shift = tl.where(idx, shift1, shift0)
-    gate = tl.where(idx, gate1, gate0)
-    y = x_hat * (1.0 + scale) + shift
 
     tl.store(out_row_ptr + cols, y, mask=mask)
     tl.store(gate_row_ptr + cols, gate, mask=mask)
@@ -888,6 +1011,15 @@ def fused_scale_shift_gate_select(
         raise ValueError("scale0/shift0/gate0/scale1/shift1/gate1 must be 2D [B, C]")
     if index.dim() != 2:
         raise ValueError("index must be 2D [B, L]")
+
+    # Ensure all tensors are contiguous for kernel access
+    shift0 = shift0.contiguous()
+    scale0 = scale0.contiguous()
+    gate0 = gate0.contiguous()
+    shift1 = shift1.contiguous()
+    scale1 = scale1.contiguous()
+    gate1 = gate1.contiguous()
+    index = index.contiguous()
 
     grid = (triton.cdiv(L, block_l), triton.cdiv(C, block_c), B)
     _fuse_scale_shift_gate_kernel_blc[grid](

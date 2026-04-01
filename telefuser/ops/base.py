@@ -39,8 +39,8 @@ class CustomOp(nn.Module):
                 self.eps = eps
 
             def forward_cuda(self, x: torch.Tensor) -> torch.Tensor:
-                from telefuser.kernel.triton import rms_norm
-                return rms_norm(x, self.weight, self.eps)
+                from telefuser.kernel.triton import norm_infer
+                return norm_infer(x, self.weight, None, self.eps, is_rms_norm=True)
 
             def forward_native(self, x: torch.Tensor) -> torch.Tensor:
                 variance = x.to(torch.float32).pow(2).mean(-1, keepdim=True)

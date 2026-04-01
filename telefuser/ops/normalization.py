@@ -15,16 +15,16 @@ import torch.nn.functional as F
 
 from .base import CustomOp
 
-KernelName = Literal["rms_norm", "layer_norm_fn", "fused_scale_shift"]
+KernelName = Literal["norm_infer", "layer_norm_fn", "fused_scale_shift"]
 
 
 @functools.lru_cache(maxsize=None)
 def _get_triton_kernel(name: KernelName) -> Callable:
     """Lazily import Triton kernel to avoid import errors on non-CUDA platforms."""
-    if name == "rms_norm":
-        from telefuser.kernel.triton import rms_norm
+    if name == "norm_infer":
+        from telefuser.kernel.triton import norm_infer
 
-        return rms_norm
+        return norm_infer
     elif name == "layer_norm_fn":
         from telefuser.kernel.triton import layer_norm_fn
 
@@ -82,8 +82,11 @@ class RMSNorm(CustomOp):
             return self.forward_native(hidden_states)
         if self.elementwise_affine and self.bias is None:
             assert self.weight is not None
-            rms_norm = _get_triton_kernel("rms_norm")
-            return rms_norm(hidden_states, self.weight, self.eps)
+            # Ensure input is contiguous for Triton kernel
+            hidden_states = hidden_states.contiguous()
+            norm_infer = _get_triton_kernel("norm_infer")
+            # weight is nn.Parameter - always contiguous by PyTorch convention
+            return norm_infer(hidden_states, self.weight, None, self.eps, is_rms_norm=True)
         return self.forward_native(hidden_states)
 
     def forward_native(self, hidden_states: torch.Tensor) -> torch.Tensor:
@@ -222,7 +225,11 @@ def fused_scale_shift(
     if torch.compiler.is_compiling():
         return x * (scale_constant + scale) + shift
 
-    if x.device.type == "cuda" and x.is_contiguous():
+    if x.device.type == "cuda":
+        # Ensure all tensors are contiguous for Triton kernel
+        x = x.contiguous()
+        scale = scale.contiguous()
+        shift = shift.contiguous()
         fused_scale_shift_kernel = _get_triton_kernel("fused_scale_shift")
         return fused_scale_shift_kernel(x, scale, shift, scale_constant)
 

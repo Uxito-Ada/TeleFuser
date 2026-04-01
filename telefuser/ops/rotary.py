@@ -13,6 +13,10 @@ def _apply_rotary_emb_cuda(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor
     """CUDA-optimized implementation using Triton kernel."""
     from telefuser.kernel.triton import apply_rotary_embedding
 
+    # Ensure all tensors are contiguous for Triton kernel
+    x = x.contiguous()
+    cos = cos.contiguous()
+    sin = sin.contiguous()
     return apply_rotary_embedding(x, cos, sin, interleaved=True)
 
 
