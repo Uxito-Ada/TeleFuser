@@ -153,7 +153,7 @@ def run_calibration(
     """
     width, height = get_target_image_size(image.size[0], image.size[1], resolution=resolution)
 
-    pipeline.denoise_high_stage.dit.set_ada_taylor_cache_calibrator(
+    pipeline.denoise_stage.dit_high.set_ada_taylor_cache_calibrator(
         num_inference_steps=PPL_CONFIG["num_inference_steps"],
         sigma_shift=PPL_CONFIG["sigma_shift"],
         model_name=model_name,
@@ -161,8 +161,8 @@ def run_calibration(
     )
 
     # Share the same calibrator between dit_high and dit_low for dual-branch architecture
-    shared_calibrator = pipeline.denoise_high_stage.dit.feature_cache
-    pipeline.denoise_low_stage.dit._feature_cache = shared_calibrator
+    shared_calibrator = pipeline.denoise_stage.dit_high.feature_cache
+    pipeline.denoise_stage.dit_low._feature_cache = shared_calibrator
 
     logger.info(
         f"Starting cache calibration with {PPL_CONFIG['num_inference_steps']} steps, sigma_shift={PPL_CONFIG['sigma_shift']}"
