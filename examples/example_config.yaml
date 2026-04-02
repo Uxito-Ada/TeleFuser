@@ -30,8 +30,8 @@ pipelines:
     gpu_count: 1
     output_type: video
     model_root: /nvfile-heatstorage/model_zoo/modelscope/Wan2.1-T2V-1.3B
+    resolution: "480p"
     ppl_config_overrides:
-      resolution: "480p"
       vfi_model_path: /nvfile-heatstorage/model_zoo/modelscope/Wan2.1-T2V-1.3B/flownet.pkl
 
   wan21_1_3b_t2v_radial:
@@ -39,8 +39,7 @@ pipelines:
     gpu_count: 1
     output_type: video
     model_root: /nvfile-heatstorage/model_zoo/modelscope/Wan2.1-T2V-1.3B
-    ppl_config_overrides:
-      resolution: "480p"
+    resolution: "480p"
 
   # ============================================================
   # wan_video — Image to Video
@@ -51,8 +50,8 @@ pipelines:
     gpu_count: 1
     output_type: video
     input_image_path: examples/data/101235-video-720_0.png
+    resolution: "480p"
     ppl_config_overrides:
-      resolution: "480p"
       attn_impl: TORCH_SDPA
 
   wan21_14b_i2v_lora:
@@ -60,8 +59,8 @@ pipelines:
     gpu_count: 1
     output_type: video
     input_image_path: examples/data/101235-video-720_0.png
+    resolution: "480p"
     ppl_config_overrides:
-      resolution: "480p"
       attn_impl: TORCH_SDPA
 
   wan22_14b_i2v:
@@ -69,8 +68,8 @@ pipelines:
     gpu_count: 1
     output_type: video
     input_image_path: examples/data/101235-video-720_0.png
+    resolution: "480p"
     ppl_config_overrides:
-      resolution: "480p"
       attn_impl: TORCH_SDPA
 
   wan22_14b_i2v_distill:
@@ -78,8 +77,8 @@ pipelines:
     gpu_count: 1
     output_type: video
     input_image_path: examples/data/101235-video-720_0.png
+    resolution: "480p"
     ppl_config_overrides:
-      resolution: "480p"
       attn_impl: TORCH_SDPA
 
   wan22_14b_i2v_lora:
@@ -87,8 +86,8 @@ pipelines:
     gpu_count: 1
     output_type: video
     input_image_path: examples/data/101235-video-720_0.png
+    resolution: "480p"
     ppl_config_overrides:
-      resolution: "480p"
       attn_impl: TORCH_SDPA
 
   wan22_14b_i2v_mix:
@@ -96,8 +95,8 @@ pipelines:
     gpu_count: 1
     output_type: video
     input_image_path: examples/data/101235-video-720_0.png
+    resolution: "480p"
     ppl_config_overrides:
-      resolution: "480p"
       attn_impl: TORCH_SDPA
 
   # ============================================================
@@ -111,8 +110,7 @@ pipelines:
     model_root: /nvfile-heatstorage/model_zoo/HunyuanVideo-1.5
     timeout_seconds: 3600
     max_gpu_memory_mb: 49152
-    ppl_config_overrides:
-      resolution: "480p"
+    resolution: "480p"
 
   hunyuan_i2v:
     script: hunyuan_video/hunyuan_video_i2v.py
@@ -122,8 +120,7 @@ pipelines:
     input_image_path: examples/data/101235-video-720_0.png
     timeout_seconds: 3600
     max_gpu_memory_mb: 55296
-    ppl_config_overrides:
-      resolution: "480p"
+    resolution: "480p"
 
   # ============================================================
   # qwen_image
@@ -176,8 +173,8 @@ pipelines:
     gpu_count: 1
     output_type: video
     timeout_seconds: 3600
+    resolution: "480p"
     ppl_config_overrides:
-      resolution: "480p"
       attn_impl: TORCH_SDPA
 
   longcat_i2v:
@@ -186,8 +183,8 @@ pipelines:
     output_type: video
     input_image_path: examples/data/101235-video-720_0.png
     timeout_seconds: 3600
+    resolution: "480p"
     ppl_config_overrides:
-      resolution: "480p"
       attn_impl: TORCH_SDPA
 
   longcat_video_continue:
@@ -196,8 +193,8 @@ pipelines:
     output_type: video
     input_video_path: examples/data/dag.mp4
     timeout_seconds: 3600
+    resolution: "480p"
     ppl_config_overrides:
-      resolution: "480p"
       attn_impl: TORCH_SDPA
 
   longcat_video_unify:
@@ -206,8 +203,8 @@ pipelines:
     output_type: video
     input_image_path: examples/data/101235-video-720_0.png
     timeout_seconds: 3600
+    resolution: "480p"
     ppl_config_overrides:
-      resolution: "480p"
       attn_impl: TORCH_SDPA
 
   longcat_t2v_refine:
@@ -215,6 +212,6 @@ pipelines:
     gpu_count: 1
     output_type: video
     timeout_seconds: 7200
+    resolution: "480p"
     ppl_config_overrides:
-      resolution: "480p"
       attn_impl: TORCH_SDPA

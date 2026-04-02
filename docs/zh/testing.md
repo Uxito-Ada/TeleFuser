@@ -230,7 +230,7 @@ python examples/run_examples.py --list
 # 运行指定 pipeline
 python examples/run_examples.py --pipeline wan21_1_3b_t2v
 
-# 运行所有启用的 pipeline
+# 运行所有启用的 pipeline（顺序执行，默认）
 python examples/run_examples.py --all
 
 # 实时显示日志输出
@@ -238,6 +238,9 @@ python examples/run_examples.py --all --verbose
 
 # 更新 baseline
 python examples/run_examples.py --all --update-baseline
+
+# 并行执行（使用多张 GPU）
+python examples/run_examples.py --all --gpus 0,1,2,3
 ```
 
 ### CLI 参考
@@ -251,7 +254,55 @@ python examples/run_examples.py [选项]
   --all                  运行所有启用的 pipeline
   --update-baseline      成功运行后更新 baseline
   --config PATH          配置文件路径（默认: example_config.yaml）
+  --gpus GPU_IDS         并行执行的 GPU 设备（如 '0,1,2,3'）
+                         指定后自动启用并行调度模式
   -v, --verbose          实时显示每个 pipeline 的日志输出
+```
+
+### 执行模式
+
+#### 顺序模式（默认）
+
+不指定 `--gpus` 时，pipeline 顺序执行，使用所有可见 GPU：
+
+```bash
+# 使用所有可用 GPU，一次运行一个 pipeline
+python examples/run_examples.py --all
+```
+
+#### 并行模式
+
+指定 `--gpus` 后，pipeline 在指定 GPU 上并行执行：
+
+```bash
+# 2 张 GPU：同时运行两个 1-gpu pipeline
+python examples/run_examples.py --all --gpus 0,1
+
+# 4 张 GPU：根据 gpu_count 并行运行多个 pipeline
+python examples/run_examples.py --all --gpus 0,1,2,3
+```
+
+**调度策略：**
+
+- 按 `gpu_count` 降序调度（大任务优先）
+- 贪心分配：最优填充可用 GPU
+- 4 GPU 示例：
+  - 2-gpu pipeline → 占用 GPU [0,1]
+  - 两个 1-gpu pipeline → 占用 GPU [2] 和 [3]
+  - 下一个 2-gpu pipeline → 等待 [0,1] 释放
+
+**示例输出：**
+
+```
+Parallel execution with GPUs: [0, 1, 2, 3]
+Pipelines to run: 5
+------------------------------------------------------------
+  Started: wan21_1_3b_t2v on GPUs [0, 1]
+  Started: qwen_t2i on GPUs [2]
+  Started: z_image_turbo_t2i on GPUs [3]
+  Finished: qwen_t2i -> PASS (45.2s) PSNR=28.5, SSIM=0.92
+  Started: qwen_t2i_lora on GPUs [2]
+  ...
 ```
 
 ### 配置说明
@@ -402,6 +453,8 @@ pixel_diff_max: 0.02 # 范围 [0, 1]，越低越严格
 ### 功能特性
 
 - **进程隔离**：每个 pipeline 在独立进程中运行，GPU 绑定
+- **并行执行**：在 GPU 资源池上并行运行多个 pipeline（使用 `--gpus`）
+- **智能调度**：贪心分配优先调度大任务，最大化 GPU 利用率
 - **Baseline 管理**：首次运行自动保存，支持更新
 - **回归指标**：视频使用 PSNR/SSIM，图像使用像素差异
 - **GPU 内存追踪**：记录每个 pipeline 的峰值显存

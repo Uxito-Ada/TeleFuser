@@ -230,7 +230,7 @@ python examples/run_examples.py --list
 # Run a specific pipeline
 python examples/run_examples.py --pipeline wan21_1_3b_t2v
 
-# Run all enabled pipelines
+# Run all enabled pipelines (sequential, default)
 python examples/run_examples.py --all
 
 # Run with real-time log output
@@ -238,6 +238,9 @@ python examples/run_examples.py --all --verbose
 
 # Update baselines after successful runs
 python examples/run_examples.py --all --update-baseline
+
+# Parallel execution across multiple GPUs
+python examples/run_examples.py --all --gpus 0,1,2,3
 ```
 
 ### CLI Reference
@@ -251,7 +254,55 @@ Options:
   --all                  Run all enabled pipelines
   --update-baseline      Update baseline outputs after successful runs
   --config PATH          Path to config YAML (default: example_config.yaml)
+  --gpus GPU_IDS         GPU devices for parallel execution (e.g., '0,1,2,3')
+                         Enables parallel scheduling when specified
   -v, --verbose          Show real-time log output from each pipeline
+```
+
+### Execution Modes
+
+#### Sequential Mode (Default)
+
+Without `--gpus`, pipelines run sequentially using all visible GPUs:
+
+```bash
+# Uses all available GPUs, one pipeline at a time
+python examples/run_examples.py --all
+```
+
+#### Parallel Mode
+
+With `--gpus`, pipelines run in parallel across specified GPUs:
+
+```bash
+# 2 GPUs: run two 1-gpu pipelines simultaneously
+python examples/run_examples.py --all --gpus 0,1
+
+# 4 GPUs: run up to 4 pipelines in parallel (based on gpu_count)
+python examples/run_examples.py --all --gpus 0,1,2,3
+```
+
+**Scheduling Strategy:**
+
+- Pipelines sorted by `gpu_count` descending (larger tasks first)
+- Greedy allocation: fill available GPUs optimally
+- Example with 4 GPUs:
+  - 2-gpu pipeline → occupies GPUs [0,1]
+  - Two 1-gpu pipelines → occupy GPUs [2] and [3]
+  - Next 2-gpu pipeline → waits until [0,1] are released
+
+**Example Output:**
+
+```
+Parallel execution with GPUs: [0, 1, 2, 3]
+Pipelines to run: 5
+------------------------------------------------------------
+  Started: wan21_1_3b_t2v on GPUs [0, 1]
+  Started: qwen_t2i on GPUs [2]
+  Started: z_image_turbo_t2i on GPUs [3]
+  Finished: qwen_t2i -> PASS (45.2s) PSNR=28.5, SSIM=0.92
+  Started: qwen_t2i_lora on GPUs [2]
+  ...
 ```
 
 ### Configuration
@@ -402,6 +453,8 @@ pixel_diff_max: 0.02 # Range [0, 1], lower = stricter
 ### Features
 
 - **Subprocess isolation**: Each pipeline runs in isolated process with pinned GPUs
+- **Parallel execution**: Run multiple pipelines simultaneously across GPU pool (use `--gpus`)
+- **Intelligent scheduling**: Greedy allocation prioritizes larger tasks, maximizes GPU utilization
 - **Baseline management**: Auto-save first run, update with flag
 - **Regression metrics**: PSNR/SSIM for video, pixel diff for image
 - **GPU memory tracking**: Peak VRAM usage per pipeline

@@ -8,6 +8,7 @@ Usage:
     python examples/run_examples.py --pipeline wan21_1_3b_t2v
     python examples/run_examples.py --all
     python examples/run_examples.py --all --update-baseline
+    python examples/run_examples.py --all --gpus 0,1,2,3  # Parallel execution
 """
 
 from __future__ import annotations
@@ -33,7 +34,7 @@ import numpy as np
 import torch
 import yaml
 
-_PROJECT_ROOT = str(Path(__file__).resolve().parents[2])
+_PROJECT_ROOT = str(Path(__file__).resolve().parents[1])
 if _PROJECT_ROOT not in sys.path:
     sys.path.insert(0, _PROJECT_ROOT)
 
@@ -61,9 +62,7 @@ def _parse_script_path(script: str) -> tuple[str, str]:
     return "unknown", parts[0] if parts else "unknown"
 
 
-def _generate_output_filename(
-    script: str, gpu_count: int, resolution: str | None, output_type: str
-) -> str:
+def _generate_output_filename(script: str, gpu_count: int, resolution: str | None, output_type: str) -> str:
     """Generate standardized output filename.
 
     Format: {example_dir}__{example_name}_{gpu_count}gpu_{resolution}.{ext}
@@ -96,6 +95,411 @@ def _is_oom(exc_or_text: Exception | str) -> bool:
 
 
 # =============================================================================
+# GPU Resource Pool
+# =============================================================================
+
+
+def _build_reproduce_cmd(pipeline_key: str, config_path: str | None) -> str:
+    """Build reproduce command string for logging and error reporting.
+
+    Args:
+        pipeline_key: Pipeline name from config.
+        config_path: Optional config YAML path.
+
+    Returns:
+        Reproduce command string.
+    """
+    cmd = f"python examples/run_examples.py --pipeline {pipeline_key}"
+    if config_path:
+        cmd += f" --config {config_path}"
+    return cmd
+
+
+class GPUPool:
+    """Manages GPU device allocation for parallel pipeline execution."""
+
+    def __init__(self, gpu_ids: list[int]):
+        """Initialize with available GPU device IDs.
+
+        Args:
+            gpu_ids: List of GPU device IDs available for scheduling.
+        """
+        self.available = sorted(gpu_ids)
+        self.allocated: dict[int, list[int]] = {}  # job_id -> list of GPU IDs
+        self._next_job_id = 0
+
+    def allocate(self, gpu_count: int) -> tuple[int, list[int]] | None:
+        """Allocate GPUs for a new job.
+
+        Args:
+            gpu_count: Number of GPUs required.
+
+        Returns:
+            (job_id, gpu_ids) if allocation successful, None if insufficient GPUs.
+        """
+        if len(self.available) < gpu_count:
+            return None
+
+        # Take first N available GPUs
+        allocated_ids = self.available[:gpu_count]
+        self.available = self.available[gpu_count:]
+
+        job_id = self._next_job_id
+        self._next_job_id += 1
+        self.allocated[job_id] = allocated_ids
+
+        return job_id, allocated_ids
+
+    def release(self, job_id: int) -> list[int]:
+        """Release GPUs from a completed job.
+
+        Args:
+            job_id: ID of the job to release.
+
+        Returns:
+            List of GPU IDs that were released.
+        """
+        if job_id not in self.allocated:
+            return []
+
+        gpu_ids = self.allocated.pop(job_id)
+        self.available.extend(gpu_ids)
+        self.available.sort()
+        return gpu_ids
+
+    def available_count(self) -> int:
+        """Return number of available GPUs."""
+        return len(self.available)
+
+    def total_count(self) -> int:
+        """Return total GPU count (available + allocated)."""
+        return len(self.available) + sum(len(v) for v in self.allocated.values())
+
+
+# =============================================================================
+# Pipeline Scheduler
+# =============================================================================
+
+
+@dataclass
+class RunningJob:
+    """Tracks a running pipeline subprocess."""
+
+    job_id: int
+    pipeline_key: str
+    ppl_cfg: PipelineConfig
+    gpu_ids: list[int]
+    process: subprocess.Popen
+    start_time: float
+    log_path: str
+
+
+class PipelineScheduler:
+    """Schedules pipelines across a GPU pool for parallel execution."""
+
+    def __init__(
+        self,
+        gpu_pool: GPUPool,
+        pipelines: dict[str, PipelineConfig],
+        output_root: str,
+        config_path: str | None,
+        update_baseline: bool,
+        verbose: bool = False,
+    ):
+        """Initialize scheduler.
+
+        Args:
+            gpu_pool: GPU resource pool for allocation.
+            pipelines: Pipeline configurations to run.
+            output_root: Output directory for results.
+            config_path: Optional config YAML path.
+            update_baseline: Whether to update baseline outputs.
+            verbose: Whether to show verbose output.
+        """
+        self.gpu_pool = gpu_pool
+        self.output_root = output_root
+        self.config_path = config_path
+        self.update_baseline = update_baseline
+        self.verbose = verbose
+
+        # Sort pipelines by gpu_count descending for greedy scheduling
+        sorted_pipelines = sorted(
+            pipelines.items(),
+            key=lambda x: x[1].gpu_count,
+            reverse=True,
+        )
+        self.pending: list[tuple[str, PipelineConfig]] = list(sorted_pipelines)
+
+        self.running: dict[int, RunningJob] = {}  # job_id -> RunningJob
+        self.results: list[Result] = []
+
+    def has_pending(self) -> bool:
+        """Check if there are pending pipelines."""
+        return len(self.pending) > 0
+
+    def has_running(self) -> bool:
+        """Check if there are running jobs."""
+        return len(self.running) > 0
+
+    def schedule_next(self) -> tuple[str, list[int]] | None:
+        """Try to schedule a pending pipeline.
+
+        Returns:
+            (pipeline_key, gpu_ids) if scheduled, None if no GPU available or no pending.
+        """
+        if not self.pending:
+            return None
+
+        # Find first pending pipeline that fits available GPUs
+        for idx, (name, ppl_cfg) in enumerate(self.pending):
+            if ppl_cfg.gpu_count <= self.gpu_pool.available_count():
+                allocation = self.gpu_pool.allocate(ppl_cfg.gpu_count)
+                if allocation:
+                    job_id, gpu_ids = allocation
+
+                    # Remove from pending
+                    self.pending.pop(idx)
+
+                    # Start subprocess
+                    env = self._build_env(gpu_ids)
+                    cmd = self._build_cmd(name)
+
+                    # Prepare log file
+                    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+                    logs_dir = os.path.join(self.output_root, "logs")
+                    os.makedirs(logs_dir, exist_ok=True)
+                    log_filename = _generate_log_filename(ppl_cfg.script, ppl_cfg.gpu_count, timestamp)
+                    log_path = os.path.join(logs_dir, log_filename)
+
+                    # Spawn subprocess (capture mode, log to file)
+                    process = subprocess.Popen(
+                        cmd,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        text=True,
+                        cwd=_PROJECT_ROOT,
+                        env=env,
+                    )
+
+                    self.running[job_id] = RunningJob(
+                        job_id=job_id,
+                        pipeline_key=name,
+                        ppl_cfg=ppl_cfg,
+                        gpu_ids=gpu_ids,
+                        process=process,
+                        start_time=time.time(),
+                        log_path=log_path,
+                    )
+
+                    return name, gpu_ids
+
+        return None
+
+    def collect_finished(self, timeout_grace: float = 5.0) -> list[Result]:
+        """Check running jobs and collect completed results.
+
+        Args:
+            timeout_grace: Extra time to wait after timeout before force kill.
+
+        Returns:
+            List of newly completed results.
+        """
+        new_results: list[Result] = []
+        finished_job_ids: list[int] = []
+
+        for job_id, job in self.running.items():
+            elapsed = time.time() - job.start_time
+            timeout = job.ppl_cfg.timeout_seconds
+
+            # Check if process finished
+            if job.process.poll() is not None:
+                result = self._process_completed_job(job)
+                new_results.append(result)
+                finished_job_ids.append(job_id)
+            # Check if timeout exceeded
+            elif elapsed > timeout:
+                # Grace period then force kill
+                if elapsed > timeout + timeout_grace:
+                    job.process.kill()
+                    job.process.wait()
+                    result = self._process_timeout_job(job)
+                    new_results.append(result)
+                    finished_job_ids.append(job_id)
+
+        # Release GPUs and remove from running
+        for job_id in finished_job_ids:
+            self.gpu_pool.release(job_id)
+            self.running.pop(job_id)
+
+        self.results.extend(new_results)
+        return new_results
+
+    def wait_all(self) -> list[Result]:
+        """Wait for all remaining jobs to complete.
+
+        Returns:
+            All results collected.
+        """
+        while self.has_running() or self.has_pending():
+            self.schedule_next()
+            self.collect_finished()
+            time.sleep(0.5)
+
+        return self.results
+
+    def _build_env(self, gpu_ids: list[int]) -> dict:
+        """Build environment with CUDA_VISIBLE_DEVICES set."""
+        env = os.environ.copy()
+        existing_pypath = env.get("PYTHONPATH", "")
+        env["PYTHONPATH"] = f"{_PROJECT_ROOT}{os.pathsep}{existing_pypath}" if existing_pypath else _PROJECT_ROOT
+        env["CUDA_VISIBLE_DEVICES"] = ",".join(str(id) for id in gpu_ids)
+        return env
+
+    def _build_cmd(self, pipeline_key: str) -> list[str]:
+        """Build subprocess command."""
+        cmd = [
+            sys.executable,
+            str(Path(__file__).resolve()),
+            "--run-single",
+            pipeline_key,
+        ]
+        if self.config_path:
+            cmd.extend(["--config", self.config_path])
+        return cmd
+
+    def _build_reproduce_cmd(self, pipeline_key: str) -> str:
+        """Build reproduce command string for logging."""
+        return _build_reproduce_cmd(pipeline_key, self.config_path)
+
+    def _process_completed_job(self, job: RunningJob) -> Result:
+        """Process a completed job and return Result."""
+        stdout_text, stderr_text = job.process.communicate()
+        elapsed = time.time() - job.start_time
+
+        # Parse result
+        data = _parse_runner_output(stdout_text)
+        status = data.get("status", "ERROR")
+        error_msg = data.get("error", "")
+        error_cat = data.get("error_category", "")
+        peak_mem = data.get("peak_gpu_memory_mb", 0.0)
+        script = data.get("script", job.ppl_cfg.script)
+
+        # OOM detection fallback
+        if not error_cat and stderr_text and _is_oom(stderr_text):
+            error_cat = "OOM_ERROR"
+
+        if not data and job.process.returncode != 0:
+            error_msg = f"Process exited with code {job.process.returncode}"
+
+        # Save log
+        reproduce_cmd = self._build_reproduce_cmd(job.pipeline_key)
+
+        with open(job.log_path, "w", encoding="utf-8") as f:
+            f.write(f"=== Pipeline: {job.pipeline_key} ===\n")
+            f.write(f"=== Timestamp: {datetime.now().strftime('%Y%m%d_%H%M%S')} ===\n")
+            f.write(f"=== GPUs: {','.join(str(id) for id in job.gpu_ids)} ===\n")
+            f.write(f"=== Command: {reproduce_cmd} ===\n\n")
+            f.write("=== STDOUT ===\n")
+            f.write(stdout_text or "(empty)\n")
+            f.write("\n=== STDERR ===\n")
+            f.write(stderr_text or "(empty)\n")
+
+        result = Result(
+            name=job.pipeline_key,
+            status=status,
+            elapsed_seconds=round(elapsed, 2),
+            peak_gpu_memory_mb=round(peak_mem, 2),
+            num_frames=data.get("num_frames"),
+            resolution=data.get("resolution"),
+            num_steps=data.get("num_steps"),
+            error_category=error_cat,
+            error_message=error_msg,
+            script=script,
+            reproduce_command=reproduce_cmd,
+            log_path=job.log_path,
+        )
+
+        # Compare against baseline
+        if status == "PASS":
+            output_path = data.get("output_path")
+            cmp = compare_against_baseline(
+                self.output_root,
+                job.ppl_cfg.script,
+                job.ppl_cfg.gpu_count,
+                output_path,
+                job.ppl_cfg.output_type,
+                job.ppl_cfg.psnr_min,
+                job.ppl_cfg.ssim_min,
+                job.ppl_cfg.pixel_diff_max,
+            )
+            result.regression_metrics = cmp.get("metrics", {})
+            result.note = cmp["message"]
+            if cmp["baseline_exists"] and not cmp["passed"]:
+                result.status = "FAIL"
+
+            if self.update_baseline and output_path and os.path.exists(output_path):
+                _update_baseline(self.output_root, output_path)
+                result.note += " [baseline updated]"
+
+        # Performance/memory threshold checks
+        if result.status == "PASS" and job.ppl_cfg.max_elapsed_seconds and result.elapsed_seconds > job.ppl_cfg.max_elapsed_seconds:
+            result.status = "FAIL"
+            result.note += f" [PERF: {result.elapsed_seconds:.1f}s > {job.ppl_cfg.max_elapsed_seconds:.1f}s]"
+
+        if result.status == "PASS" and job.ppl_cfg.max_gpu_memory_mb and result.peak_gpu_memory_mb > job.ppl_cfg.max_gpu_memory_mb:
+            result.status = "FAIL"
+            result.note += f" [MEM: {result.peak_gpu_memory_mb:.0f}MB > {job.ppl_cfg.max_gpu_memory_mb:.0f}MB]"
+
+        if result.status != "PASS" and not result.note:
+            result.note = error_msg[:60] if error_msg else ""
+            if error_cat:
+                result.note = f"[{error_cat}] {result.note}"
+
+        return result
+
+    def _process_timeout_job(self, job: RunningJob) -> Result:
+        """Process a timeout job and return Result."""
+        elapsed = time.time() - job.start_time
+        stdout_text, stderr_text = job.process.communicate()
+
+        reproduce_cmd = self._build_reproduce_cmd(job.pipeline_key)
+
+        # Save log
+        with open(job.log_path, "w", encoding="utf-8") as f:
+            f.write(f"=== Pipeline: {job.pipeline_key} ===\n")
+            f.write(f"=== Timestamp: {datetime.now().strftime('%Y%m%d_%H%M%S')} ===\n")
+            f.write(f"=== GPUs: {','.join(str(id) for id in job.gpu_ids)} ===\n")
+            f.write(f"=== Command: {reproduce_cmd} ===\n\n")
+            f.write("=== TIMEOUT ===\n")
+            f.write(f"Timeout after {job.ppl_cfg.timeout_seconds}s\n\n")
+            f.write("=== STDOUT ===\n")
+            f.write(stdout_text or "(empty)\n")
+            f.write("\n=== STDERR ===\n")
+            f.write(stderr_text or "(empty)\n")
+
+        return Result(
+            name=job.pipeline_key,
+            status="TIMEOUT",
+            elapsed_seconds=round(elapsed, 2),
+            script=job.ppl_cfg.script,
+            reproduce_command=reproduce_cmd,
+            log_path=job.log_path,
+            note=f"Timeout after {job.ppl_cfg.timeout_seconds}s",
+        )
+
+    def get_running_status(self) -> list[tuple[str, list[int], float]]:
+        """Get status of currently running jobs.
+
+        Returns:
+            List of (pipeline_key, gpu_ids, elapsed_seconds).
+        """
+        return [
+            (job.pipeline_key, job.gpu_ids, round(time.time() - job.start_time, 1))
+            for job in self.running.values()
+        ]
+
+
+# =============================================================================
 # Configuration
 # =============================================================================
 
@@ -112,7 +516,12 @@ class PipelineConfig:
     seed: int = 42
     model_root: str | None = None
     prompt: str | None = None
+    negative_prompt: str | None = None
+    resolution: str | None = None
+    aspect_ratio: str | None = None
     input_image_path: str | None = None
+    first_image_path: str | None = None
+    last_image_path: str | None = None
     input_video_path: str | None = None
     ppl_config_overrides: dict = field(default_factory=dict)
     # Regression thresholds
@@ -205,9 +614,25 @@ def _extract_click_default(module: ModuleType, param_name: str) -> str | None:
     if main_func is None or not isinstance(main_func, click.BaseCommand):
         return None
     for param in main_func.params:
-        if param.human_readable_name == param_name and param.default is not None:
-            return str(param.default)
+        if isinstance(param, click.core.Option):
+            # Match by param.name (e.g., 'prompt') or by opts (e.g., '--prompt')
+            if param.name == param_name or f"--{param_name}" in param.opts:
+                if param.default is not None:
+                    return str(param.default)
     return None
+
+
+def _extract_ppl_config_default(module: ModuleType, key: str) -> str | None:
+    """Extract a default value from the module's PPL_CONFIG or DEFAULT_CONFIG."""
+    config_attr = None
+    for attr_name in ("PPL_CONFIG", "DEFAULT_CONFIG"):
+        if hasattr(module, attr_name):
+            config_attr = attr_name
+            break
+    if config_attr is None:
+        return None
+    config = getattr(module, config_attr)
+    return config.get(key)
 
 
 def _call_get_pipeline(module: ModuleType, config: dict) -> object:
@@ -247,27 +672,64 @@ def _call_run(module: ModuleType, pipeline: object, config: dict) -> object:
     params = list(inspect.signature(func).parameters.keys())
     kwargs: dict = {"pipeline": pipeline}
 
-    # Only pass prompt if configured in YAML, otherwise use example script's default
-    if "prompt" in params and config.get("prompt"):
-        kwargs["prompt"] = config["prompt"]
+    # Helper to get param with multiple fallback sources
+    def get_param(param_name: str, default: str | None = None) -> str | None:
+        # Priority: YAML config > Click default > PPL_CONFIG
+        val = config.get(param_name)
+        if val:
+            return val
+        val = _extract_click_default(module, param_name)
+        if val:
+            return val
+        val = _extract_ppl_config_default(module, param_name)
+        if val:
+            return val
+        return default
+
+    # Prompt (required for most pipelines)
+    if "prompt" in params:
+        prompt_val = get_param("prompt")
+        if prompt_val:
+            kwargs["prompt"] = prompt_val
+
+    # Negative prompt
+    if "negative_prompt" in params:
+        kwargs["negative_prompt"] = get_param("negative_prompt", "")
 
     if "seed" in params:
         kwargs["seed"] = config.get("seed", 42)
+
+    # Resolution (e.g., "480p", "720p")
+    if "resolution" in params:
+        kwargs["resolution"] = get_param("resolution")
+
+    # Aspect ratio
+    if "aspect_ratio" in params:
+        kwargs["aspect_ratio"] = get_param("aspect_ratio")
 
     if "height" in params:
         kwargs["height"] = config.get("height", 480)
     if "width" in params:
         kwargs["width"] = config.get("width", 832)
 
-    # Image input
-    if ("image" in params or "first_image" in params) and config.get("input_image_path"):
+    # Image input (for I2V pipelines)
+    if "image" in params and config.get("input_image_path"):
         from PIL import Image
 
-        img = Image.open(config["input_image_path"]).convert("RGB")
-        if "image" in params:
-            kwargs["image"] = img
-        if "first_image" in params:
-            kwargs["first_image"] = img
+        kwargs["image"] = Image.open(config["input_image_path"]).convert("RGB")
+
+    # First/Last image input (for FL2V pipelines)
+    if "first_image" in params:
+        from PIL import Image
+
+        img_path = config.get("first_image_path") or config.get("input_image_path")
+        if img_path:
+            kwargs["first_image"] = Image.open(img_path).convert("RGB")
+
+    if "last_image" in params and config.get("last_image_path"):
+        from PIL import Image
+
+        kwargs["last_image"] = Image.open(config["last_image_path"]).convert("RGB")
 
     # Video input
     if "input_video" in params and config.get("input_video_path"):
@@ -420,7 +882,12 @@ def _run_single(pipeline_key: str, config_path: str | None) -> None:
         "seed": ppl_cfg.seed,
         "model_root": ppl_cfg.model_root,
         "prompt": ppl_cfg.prompt,
+        "negative_prompt": ppl_cfg.negative_prompt,
+        "resolution": ppl_cfg.resolution,
+        "aspect_ratio": ppl_cfg.aspect_ratio,
         "input_image_path": ppl_cfg.input_image_path,
+        "first_image_path": ppl_cfg.first_image_path,
+        "last_image_path": ppl_cfg.last_image_path,
         "input_video_path": ppl_cfg.input_video_path,
         "ppl_config_overrides": ppl_cfg.ppl_config_overrides,
         "script": ppl_cfg.script,  # Pass script for filename generation
@@ -509,9 +976,7 @@ def _run_single(pipeline_key: str, config_path: str | None) -> None:
         sys.exit(1)
 
     # Move to final location with correct filename
-    final_filename = _generate_output_filename(
-        ppl_cfg.script, ppl_cfg.gpu_count, resolution, ppl_cfg.output_type
-    )
+    final_filename = _generate_output_filename(ppl_cfg.script, ppl_cfg.gpu_count, resolution, ppl_cfg.output_type)
     final_dir = date_dir
     os.makedirs(final_dir, exist_ok=True)
     final_path = os.path.join(final_dir, final_filename)
@@ -563,31 +1028,31 @@ def _run_single(pipeline_key: str, config_path: str | None) -> None:
 
 def compute_video_metrics(baseline_path: str, current_path: str) -> dict[str, float]:
     """Compute PSNR and SSIM between two videos using streaming frame comparison."""
-    import cv2
     from skimage.metrics import peak_signal_noise_ratio, structural_similarity
 
-    cap_true = cv2.VideoCapture(baseline_path)
-    cap_test = cv2.VideoCapture(current_path)
-    if not cap_true.isOpened() or not cap_test.isOpened():
-        cap_true.release()
-        cap_test.release()
+    from telefuser.utils.video import VideoData
+
+    try:
+        video_true = VideoData(video_file=baseline_path)
+        video_test = VideoData(video_file=current_path)
+    except Exception:
+        return {}
+
+    # Compare up to the shorter video length
+    n_frames = min(len(video_true), len(video_test))
+    if n_frames == 0:
         return {}
 
     psnr_sum, ssim_sum, n = 0.0, 0.0, 0
-    while True:
-        ret_true, frame_true = cap_true.read()
-        ret_test, frame_test = cap_test.read()
-        if not ret_true or not ret_test:
-            break
+    for i in range(n_frames):
+        frame_true = np.array(video_true[i])
+        frame_test = np.array(video_test[i])
         psnr_sum += peak_signal_noise_ratio(frame_true, frame_test)
         ssim_sum += structural_similarity(frame_true, frame_test, channel_axis=2)
         n += 1
 
-    cap_true.release()
-    cap_test.release()
+    del video_true, video_test
 
-    if n == 0:
-        return {}
     return {"psnr": psnr_sum / n, "ssim": ssim_sum / n}
 
 
@@ -811,20 +1276,36 @@ def run_pipeline(
     config_path: str | None,
     update_baseline: bool,
     verbose: bool = False,
+    gpu_ids: list[int] | None = None,
 ) -> Result:
-    """Run a single pipeline in a subprocess and evaluate results."""
+    """Run a single pipeline in a subprocess and evaluate results.
+
+    Args:
+        pipeline_key: Pipeline name from config.
+        ppl_cfg: Pipeline configuration.
+        output_root: Output directory for results.
+        config_path: Optional config YAML path.
+        update_baseline: Whether to update baseline outputs.
+        verbose: Whether to show verbose output.
+        gpu_ids: Optional explicit GPU IDs to use. If None, auto-assigns GPUs.
+
+    Returns:
+        Result object with status, metrics, and details.
+    """
     gpu_count = ppl_cfg.gpu_count
 
     # Generate reproduce command
-    reproduce_cmd = f"python examples/run_examples.py --pipeline {pipeline_key}"
-    if config_path:
-        reproduce_cmd += f" --config {config_path}"
+    reproduce_cmd = _build_reproduce_cmd(pipeline_key, config_path)
 
     # Assign GPUs
     env = os.environ.copy()
     existing_pypath = env.get("PYTHONPATH", "")
     env["PYTHONPATH"] = f"{_PROJECT_ROOT}{os.pathsep}{existing_pypath}" if existing_pypath else _PROJECT_ROOT
-    if not env.get("CUDA_VISIBLE_DEVICES"):
+
+    # Set CUDA_VISIBLE_DEVICES: use provided gpu_ids or auto-assign
+    if gpu_ids is not None:
+        env["CUDA_VISIBLE_DEVICES"] = ",".join(str(id) for id in gpu_ids)
+    elif not env.get("CUDA_VISIBLE_DEVICES"):
         available = torch.cuda.device_count() if torch.cuda.is_available() else 0
         if available > 0:
             env["CUDA_VISIBLE_DEVICES"] = ",".join(str(i) for i in range(min(gpu_count, available)))
@@ -1091,6 +1572,14 @@ def main() -> None:
     parser.add_argument("--all", action="store_true", help="Run all enabled pipelines")
     parser.add_argument("--update-baseline", action="store_true", help="Update baseline outputs after successful runs")
     parser.add_argument("--config", type=str, help="Path to config YAML")
+    parser.add_argument(
+        "--gpus",
+        type=str,
+        default=None,
+        help="Available GPU devices for parallel execution (e.g., '0,1,2,3'). "
+             "When specified, enables parallel scheduling across these GPUs. "
+             "Default: use all visible GPUs (sequential execution).",
+    )
     parser.add_argument("-v", "--verbose", action="store_true", help="Show real-time log output from each pipeline")
 
     # Internal: subprocess self-invocation
@@ -1135,22 +1624,98 @@ def main() -> None:
     if not os.path.isabs(output_root):
         output_root = os.path.join(_PROJECT_ROOT, output_root)
 
-    # Run pipelines sequentially
+    # Determine GPU pool
+    gpu_ids: list[int] = []
+    if args.gpus:
+        # Parse user-specified GPU IDs
+        try:
+            gpu_ids = [int(id.strip()) for id in args.gpus.split(",")]
+        except ValueError:
+            print(f"Error: Invalid GPU IDs format '{args.gpus}'. Use comma-separated integers (e.g., '0,1,2,3')")
+            sys.exit(1)
+    else:
+        # Use all visible GPUs (sequential execution fallback)
+        if torch.cuda.is_available():
+            gpu_ids = list(range(torch.cuda.device_count()))
+
+    # Check if any GPU is available
+    if not gpu_ids:
+        print("Warning: No GPUs available. Running in CPU mode (very slow).")
+        gpu_ids = []  # Empty pool, pipelines will run without CUDA_VISIBLE_DEVICES
+
+    # Run pipelines
     results: list[Result] = []
     total = len(to_run)
     run_start = time.time()
 
-    for idx, (name, ppl_cfg) in enumerate(to_run.items(), 1):
-        elapsed_total = time.time() - run_start
-        print(f"\n[{idx}/{total}] ({elapsed_total:.0f}s) Running: {name} ...")
+    if args.gpus and len(gpu_ids) > 1:
+        # Parallel scheduling mode
+        print(f"\nParallel execution with GPUs: {gpu_ids}")
+        print(f"Pipelines to run: {total}")
+        print("-" * 60)
 
-        result = run_pipeline(
-            name, ppl_cfg, output_root, args.config, args.update_baseline, verbose=args.verbose
+        gpu_pool = GPUPool(gpu_ids)
+        scheduler = PipelineScheduler(
+            gpu_pool=gpu_pool,
+            pipelines=to_run,
+            output_root=output_root,
+            config_path=args.config,
+            update_baseline=args.update_baseline,
+            verbose=args.verbose,
         )
-        results.append(result)
 
-        if not args.verbose:
-            print(f"  -> {result.status} ({result.elapsed_seconds:.1f}s) {result.note}")
+        # Run scheduler loop
+        last_status_print = 0.0
+        status_print_interval = 10.0  # Print status every 10s when idle
+
+        while scheduler.has_pending() or scheduler.has_running():
+            # Try to schedule new pipelines
+            scheduled = scheduler.schedule_next()
+            if scheduled:
+                name, allocated_gpus = scheduled
+                print(f"  Started: {name} on GPUs {allocated_gpus}")
+                last_status_print = time.time()  # Reset timer on state change
+
+            # Collect finished jobs
+            finished = scheduler.collect_finished()
+            for r in finished:
+                print(f"  Finished: {r.name} -> {r.status} ({r.elapsed_seconds:.1f}s) {r.note[:40]}")
+                last_status_print = time.time()  # Reset timer on state change
+
+            # Show running status only periodically or on change
+            elapsed_total = time.time() - run_start
+            if elapsed_total - last_status_print >= status_print_interval:
+                running_status = scheduler.get_running_status()
+                if running_status:
+                    running_str = ", ".join(f"{name}(GPU{gpus})" for name, gpus, elapsed in running_status)
+                    elapsed_str = ", ".join(f"{elapsed:.0f}s" for _, _, elapsed in running_status)
+                    print(f"  [{elapsed_total:.0f}s] Running: {running_str} ({elapsed_str})")
+                last_status_print = elapsed_total
+
+            time.sleep(0.5)
+
+        results = scheduler.results
+    else:
+        # Sequential execution mode (original behavior)
+        print(f"\nSequential execution ({len(gpu_ids)} GPU available)")
+        print("-" * 60)
+
+        for idx, (name, ppl_cfg) in enumerate(to_run.items(), 1):
+            elapsed_total = time.time() - run_start
+            print(f"\n[{idx}/{total}] ({elapsed_total:.0f}s) Running: {name} ...")
+
+            result = run_pipeline(
+                name,
+                ppl_cfg,
+                output_root,
+                args.config,
+                args.update_baseline,
+                verbose=args.verbose,
+            )
+            results.append(result)
+
+            if not args.verbose:
+                print(f"  -> {result.status} ({result.elapsed_seconds:.1f}s) {result.note}")
 
     # Report
     print_results_table(results)

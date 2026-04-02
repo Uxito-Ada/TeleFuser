@@ -31,10 +31,10 @@ from datetime import datetime
 from pathlib import Path
 
 import click
-import cv2
 import numpy as np
 import torch
 from telefuser.utils.logging import logger
+from telefuser.utils.video import VideoData
 
 # ============== Metrics Functions ==============
 # Re-implement metrics functions to avoid ImageReward dependency
@@ -64,19 +64,9 @@ def _get_lpips_model(net="alex"):
 
 
 def _fetch_video_frames(video_path):
-    """Fetch all frames from a video file."""
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        raise ValueError(f"Could not open video file: {video_path}")
-
-    frames = []
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-        frames.append(frame)
-    cap.release()
-    return frames
+    """Fetch all frames from a video file as RGB PIL Images."""
+    video_data = VideoData(video_file=video_path)
+    return video_data.raw_data()  # list[PIL.Image.Image] in RGB
 
 
 def compute_video_psnr(video_true_path, video_test_path):
@@ -90,7 +80,10 @@ def compute_video_psnr(video_true_path, video_test_path):
 
     psnr_values = []
     for i in range(num_frames):
-        psnr = peak_signal_noise_ratio(frames_true[i], frames_test[i])
+        # Convert PIL Image to numpy array
+        frame_true = np.array(frames_true[i])
+        frame_test = np.array(frames_test[i])
+        psnr = peak_signal_noise_ratio(frame_true, frame_test)
         psnr_values.append(psnr)
 
     return np.mean(psnr_values), num_frames
@@ -107,7 +100,10 @@ def compute_video_ssim(video_true_path, video_test_path):
 
     ssim_values = []
     for i in range(num_frames):
-        ssim = structural_similarity(frames_true[i], frames_test[i], channel_axis=2)
+        # Convert PIL Image to numpy array
+        frame_true = np.array(frames_true[i])
+        frame_test = np.array(frames_test[i])
+        ssim = structural_similarity(frame_true, frame_test, channel_axis=2)
         ssim_values.append(ssim)
 
     return np.mean(ssim_values), num_frames
@@ -115,7 +111,6 @@ def compute_video_ssim(video_true_path, video_test_path):
 
 def compute_video_lpips(video_true_path, video_test_path, net="alex"):
     """Compute average LPIPS between two videos."""
-    from PIL import Image
     from torchvision.transforms.v2.functional import convert_image_dtype, normalize, pil_to_tensor
 
     frames_true = _fetch_video_frames(video_true_path)
@@ -125,12 +120,9 @@ def compute_video_lpips(video_true_path, video_test_path, net="alex"):
     if num_frames == 0:
         return None, 0
 
-    # Convert frames to tensors
+    # Convert PIL Image to tensor (already in RGB)
     def frame_to_tensor(frame):
-        # Convert BGR to RGB
-        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        pil = Image.fromarray(frame_rgb)
-        img = pil_to_tensor(pil)
+        img = pil_to_tensor(frame)
         img = convert_image_dtype(img, dtype=torch.float32)
         img = normalize(img, mean=[0.5, 0.5, 0.5], std=[0.5, 0.5, 0.5])
         return img
