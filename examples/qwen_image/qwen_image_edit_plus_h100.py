@@ -90,8 +90,7 @@ def run(
 @click.option("--image_path", default=None, help="Custom image path")
 @click.option("--output", default=get_example_name(__file__, "png"), help="Output image filename")
 def main(aspect_ratio, gpu_num, prompt, image_path, output):
-    if prompt is None and image_path is None:
-        prompt = "这个女生看着面前的电视屏幕，屏幕上面写着“阿里巴巴”"
+    if image_path is None:
         image_path = f"{os.path.dirname(__file__)}/../data/edit2511input.png"
     image = Image.open(image_path)
     pipeline = get_pipeline(gpu_num)
