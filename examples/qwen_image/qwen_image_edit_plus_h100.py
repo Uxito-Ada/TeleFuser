@@ -86,7 +86,7 @@ def run(
 @click.command()
 @click.option("--aspect_ratio", "-ar", default="1:1", help="Image ratio such as 1:1, 16:9", type=str)
 @click.option("--gpu_num", default=1, help="Number of GPUs to use", type=int)
-@click.option("--prompt", default="这个女生看着面前的电视屏幕，屏幕上面写着"阿里巴巴"", help="Custom prompt text")
+@click.option("--prompt", default='这个女生看着面前的电视屏幕，屏幕上面写着"阿里巴巴"', help="Custom prompt text")
 @click.option("--image_path", default=None, help="Custom image path")
 @click.option("--output", default=get_example_name(__file__, "png"), help="Output image filename")
 def main(aspect_ratio, gpu_num, prompt, image_path, output):

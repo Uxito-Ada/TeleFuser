@@ -88,6 +88,13 @@ def _get_date_dir(output_root: str) -> str:
     return os.path.join(output_root, date_str)
 
 
+def _resolve_output_root(output_root: str) -> str:
+    """Resolve output_root to absolute path if relative."""
+    if not os.path.isabs(output_root):
+        return os.path.join(_PROJECT_ROOT, output_root)
+    return output_root
+
+
 def _is_oom(exc_or_text: Exception | str) -> bool:
     """Check if an exception or text indicates an out-of-memory error."""
     text = str(exc_or_text).lower()
@@ -368,6 +375,7 @@ class PipelineScheduler:
         ]
         if self.config_path:
             cmd.extend(["--config", self.config_path])
+        cmd.extend(["--output-dir", self.output_dir])
         return cmd
 
     def _build_reproduce_cmd(self, pipeline_key: str) -> str:
@@ -869,7 +877,14 @@ def _emit_result(data: dict) -> None:
 
 
 def _run_single(pipeline_key: str, config_path: str | None, output_dir: str | None) -> None:
-    """Subprocess entry point: load, run, save one pipeline."""
+    """Subprocess entry point: load, run, save one pipeline.
+
+    Args:
+        pipeline_key: Pipeline name from config.
+        config_path: Optional config YAML path.
+        output_dir: Target output directory (date-based folder for results).
+                   If None, creates a new date-based directory under output_root.
+    """
     cfg = load_config(config_path)
     ppl_cfg = cfg.pipelines.get(pipeline_key)
     if ppl_cfg is None:
@@ -879,16 +894,13 @@ def _run_single(pipeline_key: str, config_path: str | None, output_dir: str | No
     examples_root = os.path.join(_PROJECT_ROOT, "examples")
     script_path = os.path.join(examples_root, ppl_cfg.script)
 
-    # Use provided output_dir or fall back to config
+    output_root = _resolve_output_root(cfg.output_root)
     if output_dir:
-        output_root = output_dir
+        target_dir = output_dir
     else:
-        output_root = cfg.output_root
-        if not os.path.isabs(output_root):
-            output_root = os.path.join(_PROJECT_ROOT, output_root)
+        target_dir = _get_date_dir(output_root)
+        os.makedirs(target_dir, exist_ok=True)
 
-    # New directory structure: date-based output directory
-    date_dir = _get_date_dir(output_root)
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     runner_config = {
@@ -991,9 +1003,7 @@ def _run_single(pipeline_key: str, config_path: str | None, output_dir: str | No
 
     # Move to final location with correct filename
     final_filename = _generate_output_filename(ppl_cfg.script, ppl_cfg.gpu_count, resolution, ppl_cfg.output_type)
-    final_dir = date_dir
-    os.makedirs(final_dir, exist_ok=True)
-    final_path = os.path.join(final_dir, final_filename)
+    final_path = os.path.join(target_dir, final_filename)
 
     if temp_path and os.path.exists(temp_path):
         shutil.move(temp_path, final_path)
@@ -1086,39 +1096,37 @@ def compute_image_diff(baseline_path: str, current_path: str) -> float | None:
 # =============================================================================
 
 
-def _check_output_exists(output_root: str, script: str, gpu_count: int, output_type: str) -> bool:
-    """Check if output file already exists in the output directory.
+def _check_output_exists(output_dir: str, script: str, gpu_count: int, output_type: str) -> bool:
+    """Check if output file already exists in the specified output directory.
 
-    Searches in date-based subdirectories and immediate children.
+    Args:
+        output_dir: Target output directory (date-based folder) to check.
+        script: Pipeline script path.
+        gpu_count: Number of GPUs used.
+        output_type: Output type (video/image).
+
+    Returns:
+        True if output file exists in the directory.
     """
     example_dir, example_name = _parse_script_path(script)
     ext = "mp4" if output_type == "video" else "png"
     pattern = f"{example_dir}__{example_name}_{gpu_count}gpu_"
 
-    if not os.path.isdir(output_root):
+    if not os.path.isdir(output_dir):
         return False
 
-    # Check immediate children (flat structure)
-    for f in os.listdir(output_root):
+    for f in os.listdir(output_dir):
         if f.startswith(pattern) and f.endswith(f".{ext}"):
             return True
-
-    # Check subdirectories (date-based structure like 2026-04-02_1530/)
-    for entry in os.listdir(output_root):
-        entry_path = os.path.join(output_root, entry)
-        if os.path.isdir(entry_path) and not entry.startswith(("baseline", "logs", "temp")):
-            for f in os.listdir(entry_path):
-                if f.startswith(pattern) and f.endswith(f".{ext}"):
-                    return True
 
     return False
 
 
-def _get_completed_pipelines(output_root: str, pipelines: dict[str, PipelineConfig]) -> set[str]:
-    """Get set of pipeline names that already have output files.
+def _get_completed_pipelines(output_dir: str, pipelines: dict[str, PipelineConfig]) -> set[str]:
+    """Get set of pipeline names that already have output files in the specified directory.
 
     Args:
-        output_root: Output directory to check.
+        output_dir: Target output directory (date-based folder) to check.
         pipelines: Dict of pipeline name to config.
 
     Returns:
@@ -1126,7 +1134,7 @@ def _get_completed_pipelines(output_root: str, pipelines: dict[str, PipelineConf
     """
     completed = set()
     for name, cfg in pipelines.items():
-        if _check_output_exists(output_root, cfg.script, cfg.gpu_count, cfg.output_type):
+        if _check_output_exists(output_dir, cfg.script, cfg.gpu_count, cfg.output_type):
             completed.add(name)
     return completed
 
@@ -1399,7 +1407,6 @@ def run_pipeline(
     ]
     if config_path:
         cmd.extend(["--config", config_path])
-    # Pass output directory to subprocess (for resume mode)
     cmd.extend(["--output-dir", output_dir])
 
     start = time.time()
@@ -1725,19 +1732,18 @@ def main() -> None:
         print("No pipelines to run.")
         return
 
-    # Determine output directory
+    output_root = _resolve_output_root(cfg.output_root)
     if args.resume:
-        # Resume mode: save outputs to resume dir, but look for baseline in parent dir
         output_dir = os.path.abspath(args.resume)
-        output_root = os.path.dirname(output_dir)
         if not os.path.isdir(output_dir):
             print(f"Error: Resume directory does not exist: {output_dir}")
             sys.exit(1)
     else:
-        output_dir = cfg.output_root
-        if not os.path.isabs(output_dir):
-            output_dir = os.path.join(_PROJECT_ROOT, output_dir)
-        output_root = output_dir
+        output_dir = _get_date_dir(output_root)
+        os.makedirs(output_dir, exist_ok=True)
+
+    print(f"Output directory: {output_dir}")
+    print(f"Baseline directory: {os.path.join(output_root, 'baseline')}")
 
     # Load completed pipelines for resume (check output file existence)
     completed_pipelines = set()
