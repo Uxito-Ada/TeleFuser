@@ -157,14 +157,14 @@ pipelines:
   # flashvsr
   # ============================================================
 
-  flashvsr_stream:
-    script: flashvsr/flashvsr_stream.py
-    gpu_count: 1
-    output_type: video
-    input_video_path: examples/data/dag.mp4
-    max_gpu_memory_mb: 26624
+  #flashvsr_stream:
+  #  script: flashvsr/flashvsr_stream.py
+  #  gpu_count: 1
+  #  output_type: video
+  #  input_video_path: examples/data/dag.mp4
+  #  max_gpu_memory_mb: 26624
 
-  # ============================================================
+  ## ============================================================
   # longcat_video
   # ============================================================
 

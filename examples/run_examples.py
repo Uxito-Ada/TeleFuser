@@ -202,8 +202,9 @@ class PipelineScheduler:
         gpu_pool: GPUPool,
         pipelines: dict[str, PipelineConfig],
         output_root: str,
-        config_path: str | None,
-        update_baseline: bool,
+        output_dir: str | None = None,
+        config_path: str | None = None,
+        update_baseline: bool = False,
         verbose: bool = False,
     ):
         """Initialize scheduler.
@@ -211,13 +212,15 @@ class PipelineScheduler:
         Args:
             gpu_pool: GPU resource pool for allocation.
             pipelines: Pipeline configurations to run.
-            output_root: Output directory for results.
+            output_root: Root directory for baseline comparison.
+            output_dir: Directory for saving outputs (defaults to output_root).
             config_path: Optional config YAML path.
             update_baseline: Whether to update baseline outputs.
             verbose: Whether to show verbose output.
         """
         self.gpu_pool = gpu_pool
         self.output_root = output_root
+        self.output_dir = output_dir or output_root
         self.config_path = config_path
         self.update_baseline = update_baseline
         self.verbose = verbose
@@ -266,7 +269,7 @@ class PipelineScheduler:
 
                     # Prepare log file
                     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    logs_dir = os.path.join(self.output_root, "logs")
+                    logs_dir = os.path.join(self.output_dir, "logs")
                     os.makedirs(logs_dir, exist_ok=True)
                     log_filename = _generate_log_filename(ppl_cfg.script, ppl_cfg.gpu_count, timestamp)
                     log_path = os.path.join(logs_dir, log_filename)
@@ -1348,8 +1351,9 @@ def run_pipeline(
     pipeline_key: str,
     ppl_cfg: PipelineConfig,
     output_root: str,
-    config_path: str | None,
-    update_baseline: bool,
+    output_dir: str | None = None,
+    config_path: str | None = None,
+    update_baseline: bool = False,
     verbose: bool = False,
     gpu_ids: list[int] | None = None,
 ) -> Result:
@@ -1358,7 +1362,8 @@ def run_pipeline(
     Args:
         pipeline_key: Pipeline name from config.
         ppl_cfg: Pipeline configuration.
-        output_root: Output directory for results.
+        output_root: Root directory for baseline comparison.
+        output_dir: Directory for saving outputs (defaults to output_root).
         config_path: Optional config YAML path.
         update_baseline: Whether to update baseline outputs.
         verbose: Whether to show verbose output.
@@ -1368,6 +1373,7 @@ def run_pipeline(
         Result object with status, metrics, and details.
     """
     gpu_count = ppl_cfg.gpu_count
+    output_dir = output_dir or output_root
 
     # Generate reproduce command
     reproduce_cmd = _build_reproduce_cmd(pipeline_key, config_path)
@@ -1394,13 +1400,13 @@ def run_pipeline(
     if config_path:
         cmd.extend(["--config", config_path])
     # Pass output directory to subprocess (for resume mode)
-    cmd.extend(["--output-dir", output_root])
+    cmd.extend(["--output-dir", output_dir])
 
     start = time.time()
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     # Prepare log file path (needed for tee mode)
-    logs_dir = os.path.join(output_root, "logs")
+    logs_dir = os.path.join(output_dir, "logs")
     os.makedirs(logs_dir, exist_ok=True)
     log_filename = _generate_log_filename(ppl_cfg.script, gpu_count, timestamp)
     log_path = os.path.join(logs_dir, log_filename)
@@ -1721,21 +1727,24 @@ def main() -> None:
 
     # Determine output directory
     if args.resume:
-        output_root = os.path.abspath(args.resume)
-        if not os.path.isdir(output_root):
-            print(f"Error: Resume directory does not exist: {output_root}")
+        # Resume mode: save outputs to resume dir, but look for baseline in parent dir
+        output_dir = os.path.abspath(args.resume)
+        output_root = os.path.dirname(output_dir)
+        if not os.path.isdir(output_dir):
+            print(f"Error: Resume directory does not exist: {output_dir}")
             sys.exit(1)
     else:
-        output_root = cfg.output_root
-        if not os.path.isabs(output_root):
-            output_root = os.path.join(_PROJECT_ROOT, output_root)
+        output_dir = cfg.output_root
+        if not os.path.isabs(output_dir):
+            output_dir = os.path.join(_PROJECT_ROOT, output_dir)
+        output_root = output_dir
 
     # Load completed pipelines for resume (check output file existence)
     completed_pipelines = set()
     if args.resume:
-        completed_pipelines = _get_completed_pipelines(output_root, to_run)
+        completed_pipelines = _get_completed_pipelines(output_dir, to_run)
         if completed_pipelines:
-            print(f"Resuming from: {output_root}")
+            print(f"Resuming from: {output_dir}")
             print(f"Skipping {len(completed_pipelines)} pipelines with existing output: {sorted(completed_pipelines)}")
             print("-" * 60)
 
@@ -1781,6 +1790,7 @@ def main() -> None:
             gpu_pool=gpu_pool,
             pipelines=to_run,
             output_root=output_root,
+            output_dir=output_dir,
             config_path=args.config,
             update_baseline=args.update_baseline,
             verbose=args.verbose,
@@ -1830,6 +1840,7 @@ def main() -> None:
                 name,
                 ppl_cfg,
                 output_root,
+                output_dir,
                 args.config,
                 args.update_baseline,
                 verbose=args.verbose,
@@ -1843,10 +1854,10 @@ def main() -> None:
     # Load existing results for resume mode
     existing_results = {}
     if args.resume:
-        existing_results = _load_existing_results(output_root)
+        existing_results = _load_existing_results(output_dir)
 
     print_results_table(results)
-    report_path = save_report_json(output_root, results, existing_results)
+    report_path = save_report_json(output_dir, results, existing_results)
     print(f"\nJSON report: {report_path}")
 
     fail_count = sum(1 for r in results if r.status in ("FAIL", "ERROR", "TIMEOUT"))

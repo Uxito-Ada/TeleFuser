@@ -95,7 +95,7 @@ def run(
 @click.command()
 @click.option("--aspect_ratio", "-ar", default="16:9", help="Image ratio such as 1:1, 16:9", type=str)
 @click.option("--gpu_num", default=1, help="Number of GPUs to use", type=int)
-@click.option("--prompt", default=None, help="Custom prompt text")
+@click.option("--prompt", default="A 20-year-old East Asian girl with delicate, charming features and large, bright brown eyes—expressive and lively, with a cheerful or subtly smiling expression. Her naturally wavy long hair is either loose or tied in twin ponytails. She has fair skin and light makeup accentuating her youthful freshness. She wears a modern, cute dress or relaxed outfit in bright, soft colors—lightweight fabric, minimalist cut. She stands indoors at an anime convention, surrounded by banners, posters, or stalls. Lighting is typical indoor illumination—no staged lighting—and the image resembles a casual iPhone snapshot: unpretentious composition, yet brimming with vivid, fresh, youthful charm.", help="Custom prompt text")
 @click.option("--output", default=get_example_name(__file__, "png"), help="Output image filename")
 def main(aspect_ratio, gpu_num, prompt, output):
     if prompt is None:
