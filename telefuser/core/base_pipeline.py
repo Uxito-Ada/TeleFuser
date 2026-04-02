@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from abc import ABC
 from datetime import datetime
+from functools import wraps
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Sequence
 
@@ -22,6 +23,20 @@ if TYPE_CHECKING:
 
 class BasePipeline(ABC):
     """Base pipeline for generation tasks."""
+
+    def __init_subclass__(cls, **kwargs):
+        super().__init_subclass__(**kwargs)
+        if "__call__" in cls.__dict__:
+            original_call = cls.__dict__["__call__"]
+
+            @wraps(original_call)
+            def wrapped_call(self, *args, **kwargs):
+                from telefuser.utils.profiler import reset_timing_registry
+
+                reset_timing_registry()
+                return original_call(self, *args, **kwargs)
+
+            cls.__call__ = wrapped_call
 
     def __init__(self, device: str | torch.device, torch_dtype: torch.dtype) -> None:
         self.device = device

@@ -1,16 +1,153 @@
 # Profiler System
 
-TeleFuser provides a profiling system for performance analysis and debugging, built on PyTorch Profiler with additional features for distributed environments.
+TeleFuser provides a three-layer progressive profiling system for performance analysis and debugging, built on PyTorch Profiler with additional features for distributed environments.
 
 ## Features
 
+- **Three-layer progressive profiling** - Stage timing → Kernel analysis → NCU deep dive
 - **Context manager and decorator** - Flexible usage patterns
 - **Sync and async support** - Works with both synchronous and asynchronous functions
 - **Distributed aware** - Automatically handles multi-rank profiling
 - **Memory tracking** - Peak memory allocation monitoring
-- **PyTorch Profiler integration** - Optional detailed kernel-level profiling
-- **Chrome trace export** - Visualize traces in Chrome DevTools
-- **Environment variable control** - Easy enable/disable without code changes
+- **Stage I/O Signature capture** - Record tensor shapes for isolated profiling
+- **Stage Bench Harness** - Profile individual stages with mock inputs (avoid 40+ DiT iterations)
+- **Auto-generated test scripts** - Reproducible profiling without harness infrastructure
+- **Organized output directory** - `work_dirs/profiler_output/{pipeline_name}/{YYYYMMDD_HHMM}`
+
+## Stage I/O Signature (Layer 1)
+
+When profiling with `TELEFUSER_PROFILE_DEBUG=true`, the profiler automatically captures
+input and output tensor signatures for each stage. This enables Layer 2 isolated profiling
+without running the full pipeline.
+
+### Captured Information
+
+For each stage, the signature includes:
+- Input tensor shapes, dtypes, and devices
+- Output tensor shapes (if applicable)
+- Non-tensor parameters (int, float, str) as metadata
+
+### Output Location
+
+Default output directory structure:
+```
+work_dirs/profiler_output/{TELEFUSER_PIPELINE_NAME}/{YYYYMMDD_HHMM}/
+├── timing.json                    # Layer 1 stage timing report
+├── timing_io_signature.json       # I/O signatures for harness
+├── denoise_trace.json.gz          # Layer 2 Chrome trace (single iteration)
+├── denoise_breakdown.json         # Layer 2 top 50 kernels
+└── profile_denoise.py             # Auto-generated test script
+```
+
+Set `TELEFUSER_PIPELINE_NAME` environment variable to organize outputs by pipeline.
+
+### Signature Format
+
+```json
+{
+  "request_id": "req_20260402_...",
+  "timestamp": "2026-04-02T...",
+  "stages": {
+    "denoise": {
+      "stage_name": "denoise",
+      "input_signatures": {
+        "latents": {"shape": [1, 16, 21, 60, 104], "dtype": "bfloat16", "device": "cuda:0"},
+        "prompt_emb_posi": {"shape": [1, 512, 4096], "dtype": "bfloat16", "device": "cuda:0"},
+        "cfg_scale": 5.0
+      },
+      "output_signature": {...},
+      "metadata": {"num_inference_steps": 40, "sigma_shift": 8.0}
+    }
+  }
+}
+```
+
+## Stage Bench Harness (Layer 2)
+
+The `StageBenchHarness` enables isolated profiling of individual stages using
+captured I/O signatures. This is especially useful for DiT models that iterate
+40+ times, where full pipeline profiling creates massive trace files.
+
+### Benefits
+
+| Aspect | Full Pipeline | Isolated Harness |
+|--------|---------------|------------------|
+| Trace size | 100MB+ | <10MB |
+| Iterations | 40+ (redundant) | 1 (clean) |
+| Memory | Full pipeline | Stage only |
+| Analysis | Hard to isolate | Clear view |
+| Reproducibility | Manual setup | Auto-generated script |
+
+### Usage
+
+```python
+from telefuser.utils.stage_bench_harness import StageBenchHarness, HarnessConfig
+
+# Create harness from signature file
+config = HarnessConfig(
+    warmup=1,
+    profile_steps=1,
+    # output_dir defaults to work_dirs/profiler_output/{pipeline_name}/{date}
+)
+
+harness = StageBenchHarness.from_signature_file(
+    signature_path="work_dirs/profiler_output/wan21_t2v/20260402/timing_io_signature.json",
+    stage_name="denoise",
+    stage_instance=pipeline.denoise_stage,  # Pass loaded stage
+    config=config,
+)
+
+# Setup and profile
+harness.setup()
+results = harness.profile()
+
+# Output files:
+# - denoise_trace.json.gz (Chrome trace, single iteration)
+# - denoise_breakdown.json (top 50 kernels)
+# - profile_denoise.py (auto-generated test script)
+```
+
+### Dynamic Single-Step Execution
+
+For DiT stages with internal loops, the harness automatically creates a single-step
+function by detecting the `dit` and `scheduler` attributes. No modification to stage
+code is required.
+
+The single-step logic extracts one iteration from the denoising loop:
+1. Setup scheduler with minimal steps (2)
+2. Take first timestep
+3. Run single forward pass + scheduler step
+
+### Kernel Breakdown Output
+
+The breakdown JSON contains top 50 kernels sorted by time (no categorization):
+
+```json
+{
+  "name": "denoise",
+  "total_kernel_time_ms": 150.0,
+  "num_kernels": 200,
+  "top_kernels": [
+    {"name": "flash_attn_fwd", "ms": 75.0, "cuda_ms": 75.0, "cpu_ms": 0.5},
+    {"name": "ampere_fp16_s1688gemm", "ms": 50.0, "cuda_ms": 50.0, "cpu_ms": 0.3},
+    {"name": "fused_add_rms_norm", "ms": 10.0, "cuda_ms": 10.0, "cpu_ms": 0.1}
+  ]
+}
+```
+
+### Generated Test Script
+
+The harness generates a standalone Python script for reproducible profiling:
+
+```python
+# profile_denoise.py - Generated by harness
+# Contains:
+# - Input tensor creation based on I/O signature
+# - Single-step execution logic for DiT stages
+# - Profiling function with warmup and trace export
+```
+
+Run the generated script with a loaded stage instance for standalone profiling.
 
 ## Quick Start
 
@@ -54,9 +191,29 @@ python your_script.py
 
 | Variable | Description | Default |
 |----------|-------------|---------|
-| `ENABLE_PROFILER_NAMES` | Comma-separated list of profiler names to enable | "" (empty) |
-| `PROFILER_OUTPUT_DIR` | Directory for Chrome trace output files | "./profiler_output" |
-| `TELEFUSER_PROFILE_DEBUG` | Enable all debug profiling contexts | "false" |
+| `TELEFUSER_PROFILE_DEBUG` | Enable all debug profiling contexts (Layer 1+) | "false" |
+| `TELEFUSER_PIPELINE_NAME` | Pipeline name for output directory | "default" |
+| `TELEFUSER_PROFILER_OUTPUT_DIR` | Override output directory (default: work_dirs/profiler_output/{name}/{date}) | None |
+| `ENABLE_PROFILER_NAMES` | Comma-separated stage names for torch.profiler (deprecated, use harness) | "" |
+
+**Default Output Directory:**
+
+```
+work_dirs/profiler_output/{TELEFUSER_PIPELINE_NAME}/{YYYYMMDD_HHMM}/
+```
+
+**Quick Reference:**
+
+```bash
+# Layer 1: Stage timing + I/O signature capture
+export TELEFUSER_PROFILE_DEBUG=true
+export TELEFUSER_PIPELINE_NAME="wan21_t2v"  # Optional, for organized output
+python examples/wan_video/wan21_1_3b_text_to_video_h100.py
+# Output: work_dirs/profiler_output/wan21_t2v/20260402/timing.json
+
+# Layer 2: Isolated stage profiling (recommended)
+# Use StageBenchHarness programmatically with loaded stage
+```
 
 ### Controlling Profiler Activation
 
@@ -64,17 +221,18 @@ python your_script.py
 from telefuser.utils.profiler import (
     enable_profiler_for_names,
     set_profiler_output_dir,
-    get_enabled_profiler_names,
+    set_pipeline_name,
+    get_profiler_output_dir,
 )
 
-# Programmatically enable profilers
-enable_profiler_for_names("vae_decode,text_encoding")
+# Programmatically set pipeline name
+set_pipeline_name("wan21_t2v")
 
-# Set output directory
+# Override output directory
 set_profiler_output_dir("/path/to/traces")
 
-# Check enabled names
-names = get_enabled_profiler_names()  # Returns: {"vae_decode", "text_encoding"}
+# Get current output directory
+output_dir = get_profiler_output_dir()
 ```
 
 ## ProfilingContext vs ProfilingContext4Debug
@@ -132,34 +290,32 @@ When using `ProfilingContext`, the following information is logged:
 Rank 0 - Function 'my_operation' Peak Memory: 4.50 GB
 ```
 
-When PyTorch Profiler is enabled:
+When Layer 1 profiling is enabled:
 
 ```
-Rank 0 - Starting PyTorch profiler for 'my_operation'
-Rank 0 - PyTorch profiler trace saved to: ./profiler_output/my_operation_rank0_run1.json
-Rank 0 - Profiler summary for 'my_operation': Total operations: 150
-Rank 0 -   1. aten::addmm: CPU=12.34 ms, CUDA=8.56 ms
-Rank 0 -   2. aten::copy_: CPU=5.23 ms, CUDA=3.21 ms
-...
+[Profiler] Timing report saved to: work_dirs/profiler_output/wan21_t2v/20260402/timing.json
+[Profiler] I/O signature saved to: work_dirs/profiler_output/wan21_t2v/20260402/timing_io_signature.json
+```
+
+When Layer 2 harness profiling is active:
+
+```
+[Harness] Setup complete for stage 'denoise'
+[Harness] Running 1 warmup iteration(s)...
+[Harness] Running 1 profile iteration(s)...
+[Harness] Chrome trace saved to: work_dirs/.../denoise_trace.json.gz
+[Harness] Kernel breakdown saved to: work_dirs/.../denoise_breakdown.json
+[Harness] Test script saved to: work_dirs/.../profile_denoise.py
+[Harness] Average iteration time: 150.00 ms
 ```
 
 ### Chrome Trace Files
 
-When PyTorch Profiler is enabled, Chrome trace files are exported:
+Chrome trace files can be visualized:
 
-```
-profiler_output/
-├── vae_decode_rank0_run1.json
-├── vae_decode_rank0_run2.json
-├── text_encoding_rank0_run1.json
-└── dit_denoising_rank0_run1.json
-```
-
-To visualize:
-
-1. Open Chrome DevTools (`chrome://tracing`)
-2. Click "Load" and select the JSON trace file
-3. Analyze kernel timing, memory operations, and CPU/GPU timeline
+1. **Chrome browser:** `chrome://tracing` → Load the `.json.gz` file
+2. **TensorBoard:** `tensorboard --logdir work_dirs/profiler_output`
+3. **Perfetto:** https://ui.perfetto.dev/
 
 ## Parameters
 
@@ -311,14 +467,20 @@ with ProfilingContext("sequence_op", reset_peak_memory=False):
 
 ### Large Trace Files
 
-If trace files are too large:
+Use isolated Stage Bench Harness instead of full pipeline profiling:
 
-1. Enable only specific profiler names
-2. Reduce profiling duration
-3. Profile fewer operations
+```python
+# Instead of full pipeline (creates 100MB+ traces)
+# Use harness for single iteration profiling
+from telefuser.utils.stage_bench_harness import StageBenchHarness
 
-```bash
-export ENABLE_PROFILER_NAMES="dit_denoising"  # Only one operation
+harness = StageBenchHarness.from_signature_file(
+    signature_path="timing_io_signature.json",
+    stage_name="denoise",
+    stage_instance=pipeline.denoise_stage,
+)
+harness.setup()
+harness.profile()  # Creates <10MB trace
 ```
 
 ### Missing GPU Activity
@@ -343,6 +505,24 @@ from telefuser.platforms import current_platform
 current_platform.synchronize()
 with ProfilingContext("operation"):
     pass
+```
+
+### Stage Instance Not Available for CLI
+
+CLI mode cannot execute stage profiling without a loaded model. Use programmatic
+approach with a loaded stage instance:
+
+```python
+# Load pipeline first
+from my_pipeline import get_pipeline
+pipeline = get_pipeline()
+
+# Then use harness
+harness = StageBenchHarness.from_signature_file(
+    signature_path="timing_io_signature.json",
+    stage_name="denoise",
+    stage_instance=pipeline.denoise_stage,
+)
 ```
 
 ## Related Documentation

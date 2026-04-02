@@ -60,6 +60,9 @@ def _worker_loop(
 
     Initializes distributed process group and processes tasks.
     """
+    from telefuser.utils.profiler import mark_as_worker_process
+
+    mark_as_worker_process()
     try:
         device = stage.device
         if world_size > 1:
@@ -222,14 +225,14 @@ class ParallelWorker:
         def wait() -> Any:
             try:
                 res = self.queue_out.get(timeout=self.timeout)
-                if isinstance(res, Exception):
-                    raise res
             except Empty:
                 logger.error(f"ParallelWorker:{self.name} __call__ timeout")
                 raise RuntimeError(f"ParallelWorker:{self.name} __call__ timeout")
             except Exception as e:
                 logger.error(f"ParallelWorker:{self.name} __call__ error: {e}")
                 raise RuntimeError(f"ParallelWorker:{self.name} __call__ error: {e}")
+            if isinstance(res, Exception):
+                raise res
             return res
 
         if sync:
@@ -253,8 +256,6 @@ class ParallelWorker:
                 start_time = time.perf_counter()
                 try:
                     res = self.queue_out.get(timeout=self.timeout)
-                    if isinstance(res, Exception):
-                        raise res
                 except Empty:
                     logger.error(f"ParallelWorker:{self.name} {name} timeout")
                     raise RuntimeError(f"ParallelWorker:{self.name} {name} timeout")
@@ -266,7 +267,8 @@ class ParallelWorker:
                         duration = time.perf_counter() - start_time
                         hook.record_execution(duration, success=True)
                         hook.exit()
-
+                if isinstance(res, Exception):
+                    raise res
                 logger.info(f"ParallelWorker:{self.name} {name} done")
                 return res
 
