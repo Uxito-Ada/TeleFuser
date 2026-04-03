@@ -65,3 +65,8 @@ class RocmPlatform(BasePlatform):
     @staticmethod
     def get_device_capability(device: int | str | torch.device | None = None) -> tuple[int, int]:
         return torch.cuda.get_device_capability(device)
+
+    @staticmethod
+    def get_device_total_memory(device: int | str | torch.device | None = None) -> int:
+        """Get total GPU memory in bytes."""
+        return torch.cuda.get_device_properties(device).total_memory

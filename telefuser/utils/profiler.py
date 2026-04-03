@@ -6,6 +6,7 @@ Three-layer profiling (progressive enablement):
 Layer 1 (Gated by TELEFUSER_PROFILE_DEBUG=true):
     - Stage timing (ms)
     - Peak GPU memory (GB)
+    - Memory snapshots at checkpoints
     - Auto export to JSON
     - Enable: TELEFUSER_PROFILE_DEBUG=true (and optionally TELEFUSER_TIMING_REPORT=path.json)
 
@@ -39,6 +40,7 @@ from __future__ import annotations
 
 import asyncio
 import atexit
+import inspect
 import json
 import os
 import tempfile
@@ -48,12 +50,23 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from functools import wraps
 from pathlib import Path
-from typing import Any, Callable, Optional, TypeVar, cast
+from typing import Any, Callable, TypeVar, cast
 
 import torch
 
 from telefuser.platforms import current_platform
 from telefuser.utils.logging import logger
+from telefuser.utils.memory_snapshot import (
+    MemorySnapshot,
+    capture_memory_snapshot,
+    get_memory_analysis,
+    get_memory_snapshots,
+    print_memory_analysis,
+    record_memory_snapshot,
+    reset_memory_registry,
+    reset_peak_memory_stats,
+    set_memory_baseline,
+)
 
 F = TypeVar("F", bound=Callable[..., Any])
 
@@ -120,7 +133,7 @@ class StageIOSignature:
             elif isinstance(sig, list) and sig and isinstance(sig[0], TensorSignature):
                 inputs[name] = [s.to_dict() for s in sig]
             else:
-                inputs[name] = sig  # str, float, int, None
+                inputs[name] = sig
         return {
             "stage_name": self.stage_name,
             "input_signatures": inputs,
@@ -136,11 +149,11 @@ def _extract_signature_from_value(value: Any) -> TensorSignature | list[TensorSi
     if isinstance(value, torch.Tensor):
         return TensorSignature.from_tensor(value)
     if isinstance(value, (list, tuple)):
-        # Check if it's a list of tensors
-        if value and isinstance(value[0], torch.Tensor):
-            return [TensorSignature.from_tensor(t) for t in value]
-        # Otherwise it's a list of primitives (e.g., list[str])
-        return f"list[{type(value[0]).__name__}]"
+        return (
+            [TensorSignature.from_tensor(t) for t in value]
+            if value and isinstance(value[0], torch.Tensor)
+            else f"list[{type(value[0]).__name__}]"
+        )
     if isinstance(value, (str, float, int, bool)):
         return value
     return str(type(value).__name__)
@@ -165,7 +178,7 @@ def _should_enable_profiler(name: str) -> bool:
     return name in enabled_set
 
 
-def _get_timing_report_path() -> Optional[str]:
+def _get_timing_report_path() -> str | None:
     """Get Layer 1 timing report output path from env."""
     return os.getenv("TELEFUSER_TIMING_REPORT")
 
@@ -179,18 +192,11 @@ def _get_profiler_output_dir() -> Path:
     """Get profiler output directory.
 
     Default: work_dirs/profiler_output/{pipeline_name}/{YYYYMMDD_HHMM}
-
-    Can be overridden by TELEFUSER_PROFILER_OUTPUT_DIR env var.
     """
-    # Check for explicit override
     explicit_dir = os.getenv("TELEFUSER_PROFILER_OUTPUT_DIR")
     if explicit_dir:
         return Path(explicit_dir)
-
-    # Default path: work_dirs/profiler_output/{pipeline_name}/{date_time}
-    pipeline_name = _get_pipeline_name()
-    date_str = datetime.now().strftime("%Y%m%d_%H%M")
-    return Path("work_dirs") / "profiler_output" / pipeline_name / date_str
+    return Path("work_dirs") / "profiler_output" / _get_pipeline_name() / datetime.now().strftime("%Y%m%d_%H%M")
 
 
 def set_pipeline_name(name: str) -> None:
@@ -223,13 +229,10 @@ def _clean_worker_timing_dir() -> None:
     worker_dir = _get_worker_timing_dir()
     if worker_dir.exists():
         for f in worker_dir.glob("*.json"):
-            try:
-                f.unlink()
-            except OSError:
-                pass
+            f.unlink(missing_ok=True)
 
 
-def _write_worker_timing_file(name: str, rank: int, duration_ms: float, peak_memory_gb: float) -> None:
+def _write_worker_timing_file(name: str, rank: int, duration_ms: float, memory_snapshot: MemorySnapshot | None) -> None:
     """Write a timing record file from a worker process."""
     worker_dir = _get_worker_timing_dir()
     worker_dir.mkdir(parents=True, exist_ok=True)
@@ -238,7 +241,7 @@ def _write_worker_timing_file(name: str, rank: int, duration_ms: float, peak_mem
         "rank": rank,
         "name": name,
         "duration_ms": duration_ms,
-        "peak_memory_gb": peak_memory_gb,
+        "peak_memory_gb": memory_snapshot.peak_reserved_gb if memory_snapshot else 0.0,
     }
     try:
         with open(timing_file, "w", encoding="utf-8") as f:
@@ -252,32 +255,20 @@ def _write_worker_timing_file(name: str, rank: int, duration_ms: float, peak_mem
 # =============================================================================
 
 
-@dataclass
-class StageTimingRecord:
-    """Record for a single stage execution."""
-
-    name: str
-    duration_ms: float
-    peak_memory_gb: float
-    timestamp: str = ""
-
-    def __post_init__(self):
-        if not self.timestamp:
-            self.timestamp = datetime.now().isoformat()
-
-
 class GlobalTimingRegistry:
     """
     Global registry for collecting stage timing across the pipeline.
 
     Layer 1: Always collects timing + memory + I/O signatures.
     Supports auto-export via TELEFUSER_TIMING_REPORT env var.
+
+    Memory tracking is delegated to the memory_snapshot module.
     """
 
-    _instance: Optional["GlobalTimingRegistry"] = None
+    _instance: "GlobalTimingRegistry | None" = None
 
     def __init__(self):
-        self._records: list[StageTimingRecord] = []
+        self._records: list[dict[str, Any]] = []
         self._request_id: str = ""
         self._metadata: dict[str, Any] = {}
         self._parallel_info: dict[str, Any] = {}
@@ -303,17 +294,20 @@ class GlobalTimingRegistry:
         instance._io_signatures = {}
         instance._start_time = time.perf_counter()
         instance._end_time = 0.0
+        # Reset memory registry
+        reset_memory_registry()
         _clean_worker_timing_dir()
         return instance
 
-    def record(self, name: str, duration_ms: float, peak_memory_gb: float) -> None:
-        """Record a stage timing."""
+    def record(self, name: str, duration_ms: float, memory_snapshot: MemorySnapshot | None = None) -> None:
+        """Record a stage timing with memory snapshot."""
         self._records.append(
-            StageTimingRecord(
-                name=name,
-                duration_ms=duration_ms,
-                peak_memory_gb=peak_memory_gb,
-            )
+            {
+                "name": name,
+                "duration_ms": duration_ms,
+                "timestamp": datetime.now().isoformat(),
+                "memory_snapshot": memory_snapshot,
+            }
         )
 
     def record_parallel_stage(self, name: str, rank_records: dict[int, dict]) -> None:
@@ -324,13 +318,13 @@ class GlobalTimingRegistry:
             rank_records: {rank: {"duration_ms": ..., "peak_memory_gb": ...}}
         """
         max_duration = max(r["duration_ms"] for r in rank_records.values())
-        max_peak_mem = max(r["peak_memory_gb"] for r in rank_records.values())
         self._records.append(
-            StageTimingRecord(
-                name=name,
-                duration_ms=max_duration,
-                peak_memory_gb=max_peak_mem,
-            )
+            {
+                "name": name,
+                "duration_ms": max_duration,
+                "timestamp": datetime.now().isoformat(),
+                "memory_snapshot": None,
+            }
         )
         self._parallel_info[name] = {
             "num_ranks": len(rank_records),
@@ -366,6 +360,12 @@ class GlobalTimingRegistry:
         if self._end_time == 0.0:
             self._end_time = time.perf_counter()
 
+    def _compute_totals(self) -> tuple[float, float]:
+        """Compute total duration and wall clock time."""
+        total_ms = sum(r["duration_ms"] for r in self._records)
+        wall_clock_ms = (self._end_time - self._start_time) * 1000 if self._end_time > 0 else total_ms
+        return total_ms, wall_clock_ms
+
     def _aggregate_worker_timing(self) -> None:
         """Aggregate timing records from worker processes via file-based IPC.
 
@@ -398,53 +398,45 @@ class GlobalTimingRegistry:
 
         # Clean up after aggregation
         for timing_file in timing_files:
-            try:
-                timing_file.unlink()
-            except OSError:
-                pass
+            timing_file.unlink(missing_ok=True)
 
     def get_report(self) -> dict:
         """Get timing report as dict."""
         self._aggregate_worker_timing()
         self.finalize()
 
-        total_ms = sum(r.duration_ms for r in self._records)
-        wall_clock_ms = (self._end_time - self._start_time) * 1000 if self._end_time > 0 else total_ms
+        total_ms, wall_clock_ms = self._compute_totals()
 
-        # Calculate memory stats
-        peak_memory_gb = max((r.peak_memory_gb for r in self._records), default=0.0)
-
-        # Stage breakdown as dict for easy lookup
+        # Stage breakdown
         stages_dict = {}
         for r in self._records:
+            pct = round(r["duration_ms"] / total_ms * 100, 1) if total_ms > 0 else 0
             stage_data: dict[str, Any] = {
-                "duration_ms": round(r.duration_ms, 2),
-                "peak_memory_gb": round(r.peak_memory_gb, 3),
-                "percentage": round(r.duration_ms / total_ms * 100, 1) if total_ms > 0 else 0,
+                "duration_ms": round(r["duration_ms"], 2),
+                "percentage": pct,
             }
-            if r.name in self._parallel_info:
-                stage_data["parallel_info"] = self._parallel_info[r.name]
-            stages_dict[r.name] = stage_data
+            if r["memory_snapshot"] is not None:
+                stage_data["memory"] = r["memory_snapshot"].to_dict()
+            if r["name"] in self._parallel_info:
+                stage_data["parallel_info"] = self._parallel_info[r["name"]]
+            stages_dict[r["name"]] = stage_data
 
-        return {
+        report = {
             "request_id": self._request_id,
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "wall_clock_ms": round(wall_clock_ms, 2),
             "total_stages_ms": round(total_ms, 2),
-            "peak_memory_gb": round(peak_memory_gb, 3),
             "num_stages": len(self._records),
             "stages": stages_dict,
-            "stages_list": [
-                {
-                    "name": r.name,
-                    "duration_ms": round(r.duration_ms, 2),
-                    "peak_memory_gb": round(r.peak_memory_gb, 3),
-                    "timestamp": r.timestamp,
-                }
-                for r in self._records
-            ],
             "metadata": self._metadata,
         }
+
+        # Integrate full memory analysis from memory_snapshot module
+        memory_analysis = get_memory_analysis()
+        if memory_analysis:
+            report["memory"] = memory_analysis
+
+        return report
 
     def dump(self, path: str) -> None:
         """Dump timing report to JSON file."""
@@ -456,29 +448,69 @@ class GlobalTimingRegistry:
 
     def summary(self) -> str:
         """Get human-readable summary string."""
-        total_ms = sum(r.duration_ms for r in self._records)
-        peak_memory_gb = max((r.peak_memory_gb for r in self._records), default=0.0)
+        total_ms, wall_clock_ms = self._compute_totals()
+        memory_analysis = get_memory_analysis()
 
         lines = [
             "",
             "=" * 60,
             f"Pipeline Timing Summary ({self._request_id})",
             "=" * 60,
-            f"Total: {total_ms:.1f} ms ({total_ms / 1000:.2f} s)",
-            f"Peak Memory: {peak_memory_gb:.2f} GB",
-            "-" * 60,
+            f"Wall Clock: {wall_clock_ms:.1f} ms ({wall_clock_ms / 1000:.2f} s)",
+            f"Stage Total: {total_ms:.1f} ms",
         ]
 
+        # Memory section from memory_analysis
+        if memory_analysis:
+            peak_res_gb = memory_analysis["peak_reserved_gb"]
+            peak_res_mb = memory_analysis["peak_reserved_mb"]
+            peak_alloc_gb = memory_analysis["peak_allocated_gb"]
+            peak_alloc_mb = memory_analysis["peak_allocated_mb"]
+            pool_mb = memory_analysis["pool_overhead_mb"]
+            pool_pct = memory_analysis["pool_overhead_pct"]
+            remaining_gb = memory_analysis["remaining_memory_gb"]
+            lines.extend(
+                [
+                    "",
+                    "Memory Statistics:",
+                    f"  Peak Reserved: {peak_res_gb:.2f} GB ({peak_res_mb:.0f} MB)",
+                    f"  Peak Allocated: {peak_alloc_gb:.2f} GB ({peak_alloc_mb:.0f} MB)",
+                    f"  Pool Overhead: {pool_mb:.0f} MB ({pool_pct:.1f}%)",
+                    f"  Remaining: {remaining_gb:.2f} GB",
+                ]
+            )
+            if "memory_increase_gb" in memory_analysis:
+                lines.append(f"  Increase from Baseline: {memory_analysis['memory_increase_gb']:.2f} GB")
+
+        lines.append("-" * 60)
+        lines.append("Stage Breakdown:")
+
         for r in self._records:
-            pct = r.duration_ms / total_ms * 100 if total_ms > 0 else 0
-            lines.append(f"  {r.name:30s} {r.duration_ms:8.1f} ms ({pct:5.1f}%)  peak: {r.peak_memory_gb:.2f} GB")
-            if r.name in self._parallel_info:
-                for rank_data in self._parallel_info[r.name]["ranks"]:
+            pct = r["duration_ms"] / total_ms * 100 if total_ms > 0 else 0
+            mem_info = ""
+            if r["memory_snapshot"]:
+                mem_info = (
+                    f"  mem: {r['memory_snapshot'].allocated_mb:.0f}/{r['memory_snapshot'].reserved_mb:.0f} MB "
+                    f"(peak: {r['memory_snapshot'].peak_allocated_mb:.0f}/{r['memory_snapshot'].peak_reserved_mb:.0f})"
+                )
+            lines.append(f"  {r['name']:30s} {r['duration_ms']:8.1f} ms ({pct:5.1f}%){mem_info}")
+            if r["name"] in self._parallel_info:
+                for rank_data in self._parallel_info[r["name"]]["ranks"]:
                     lines.append(
-                        f"    rank {rank_data['rank']:2d}: "
-                        f"{rank_data['duration_ms']:8.1f} ms  "
+                        f"    rank {rank_data['rank']:2d}: {rank_data['duration_ms']:8.1f} ms  "
                         f"peak: {rank_data['peak_memory_gb']:.2f} GB"
                     )
+
+        # Memory checkpoints from memory_snapshot module
+        memory_snapshots = get_memory_snapshots()
+        if memory_snapshots:
+            lines.append("-" * 60)
+            lines.append("Memory Checkpoints:")
+            for name, snapshot in memory_snapshots.items():
+                lines.append(
+                    f"  {name}: {snapshot.allocated_mb:.0f}/{snapshot.reserved_mb:.0f} MB "
+                    f"(peak: {snapshot.peak_allocated_mb:.0f}/{snapshot.peak_reserved_mb:.0f} MB)"
+                )
 
         lines.append("=" * 60)
         return "\n".join(lines)
@@ -600,7 +632,7 @@ class _ProfilingContext:
     """
     Profiling context manager and decorator.
 
-    Layer 1 (Always): Record timing + peak memory to GlobalTimingRegistry
+    Layer 1 (Always): Record timing + peak memory directly
     Layer 2 (Optional): torch.profiler trace + kernel breakdown
 
     Usage:
@@ -609,24 +641,49 @@ class _ProfilingContext:
             ...
     """
 
-    def __init__(self, name: str, *, reset_peak_memory: bool = True):
+    def __init__(
+        self,
+        name: str,
+        *,
+        reset_peak_memory: bool = True,
+        capture_memory: bool = False,
+    ):
         self.name = name
         self.reset_peak_memory = reset_peak_memory
+        self.capture_memory = capture_memory
         self._rank = _get_rank()
         self._rank_info = f"[Rank {self._rank}]"
         self._enable_profiler = _should_enable_profiler(name)
         self._profiler: torch.profiler.profile | None = None
-        self._start_time: float = 0.0
         self._output_dir = _get_profiler_output_dir()
+        self._start_time: float = 0.0
+        self._duration_ms: float = 0.0
+        self._memory_snapshot: MemorySnapshot | None = None
 
     def _get_output_path(self, suffix: str) -> Path:
         """Get output file path with suffix."""
         return self._output_dir / f"{self.name}_rank{self._rank}.{suffix}"
 
+    def _format_memory_info(self) -> str:
+        """Format memory info string for logging."""
+        if self._memory_snapshot:
+            return (
+                f", memory: {self._memory_snapshot.allocated_mb:.0f}/"
+                f"{self._memory_snapshot.reserved_mb:.0f} MB "
+                f"(peak: {self._memory_snapshot.peak_allocated_mb:.0f}/"
+                f"{self._memory_snapshot.peak_reserved_mb:.0f} MB)"
+            )
+        return ""
+
     def __enter__(self):
         current_platform.synchronize()
+
+        if self.capture_memory:
+            record_memory_snapshot(f"before_{self.name}")
+
         if self.reset_peak_memory:
-            current_platform.reset_peak_memory_stats()
+            reset_peak_memory_stats()
+
         self._start_time = time.perf_counter()
 
         if self._enable_profiler:
@@ -648,22 +705,24 @@ class _ProfilingContext:
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         current_platform.synchronize()
-        duration_ms = (time.perf_counter() - self._start_time) * 1000
-        peak_memory_gb = current_platform.max_memory_allocated() / (1024**3)
 
-        GlobalTimingRegistry.get_instance().record(
-            name=self.name,
-            duration_ms=duration_ms,
-            peak_memory_gb=peak_memory_gb,
-        )
+        # Compute timing and memory
+        self._duration_ms = (time.perf_counter() - self._start_time) * 1000
+        self._memory_snapshot = capture_memory_snapshot()
+
+        if self.capture_memory:
+            record_memory_snapshot(f"after_{self.name}")
+
+        # Register with global registry
+        GlobalTimingRegistry.get_instance().record(self.name, self._duration_ms, self._memory_snapshot)
 
         # In worker processes, write timing to file for main process aggregation
         if _IS_WORKER_PROCESS:
-            _write_worker_timing_file(self.name, self._rank, duration_ms, peak_memory_gb)
+            _write_worker_timing_file(self.name, self._rank, self._duration_ms, self._memory_snapshot)
 
-        logger.info(
-            f"{self._rank_info} [Timing] {self.name}: {duration_ms:.2f} ms, peak memory: {peak_memory_gb:.2f} GB"
-        )
+        # Log with memory details
+        mem_info = self._format_memory_info()
+        logger.info(f"{self._rank_info} [Timing] {self.name}: {self._duration_ms:.2f} ms{mem_info}")
 
         if self._enable_profiler and self._profiler:
             self._profiler.stop()
@@ -690,38 +749,24 @@ class _ProfilingContext:
         except Exception:
             return
 
-        # Collect all kernels with their timing
         kernels = []
         for event in events:
-            kernel_name = event.key
-            cuda_time_us = getattr(event, "cuda_time_total", 0)
-            cpu_time_us = getattr(event, "cpu_time_total", 0)
-            total_time_ms = max(cuda_time_us, cpu_time_us) / 1000
-
-            if total_time_ms < 0.01:
+            cuda_ms = getattr(event, "cuda_time_total", 0) / 1000
+            cpu_ms = getattr(event, "cpu_time_total", 0) / 1000
+            total_ms = max(cuda_ms, cpu_ms)
+            if total_ms < 0.01:
                 continue
-
             kernels.append(
-                {
-                    "name": kernel_name,
-                    "ms": round(total_time_ms, 2),
-                    "cuda_ms": round(cuda_time_us / 1000, 2),
-                    "cpu_ms": round(cpu_time_us / 1000, 2),
-                }
+                {"name": event.key, "ms": round(total_ms, 2), "cuda_ms": round(cuda_ms, 2), "cpu_ms": round(cpu_ms, 2)}
             )
 
-        # Sort by total time and take top 50
         kernels.sort(key=lambda x: -x["ms"])
-        top_kernels = kernels[:50]
-
-        total_time = sum(k["ms"] for k in kernels)
-
         report = {
             "name": self.name,
             "rank": self._rank,
-            "total_kernel_time_ms": round(total_time, 2),
+            "total_kernel_time_ms": round(sum(k["ms"] for k in kernels), 2),
             "num_kernels": len(kernels),
-            "top_kernels": top_kernels,
+            "top_kernels": kernels[:50],
         }
 
         breakdown_path = self._get_output_path("breakdown.json")
@@ -737,96 +782,70 @@ class _ProfilingContext:
 
     def __call__(self, func: F) -> F:
         """Decorator support for wrapping functions."""
-        name = self.name
-        reset_peak_memory = self.reset_peak_memory
-
-        # Get function parameter names for signature extraction
-        import inspect
-
+        is_async = asyncio.iscoroutinefunction(func)
         sig = inspect.signature(func)
         param_names = list(sig.parameters.keys())
 
-        if asyncio.iscoroutinefunction(func):
+        @wraps(func)
+        async def async_wrapper(*args, **kwargs):
+            input_signatures = _capture_input_signatures(args, kwargs, param_names)
+            async with _ProfilingContext(self.name, **self._ctx_kwargs):
+                result = await func(*args, **kwargs)
+            _record_stage_signature(self.name, input_signatures, result, kwargs)
+            return result
 
-            @wraps(func)
-            async def async_wrapper(*args, **kwargs):
-                # Capture input signatures before execution
-                input_signatures = _capture_input_signatures(args, kwargs, param_names)
+        @wraps(func)
+        def sync_wrapper(*args, **kwargs):
+            input_signatures = _capture_input_signatures(args, kwargs, param_names)
+            with _ProfilingContext(self.name, **self._ctx_kwargs):
+                result = func(*args, **kwargs)
+            _record_stage_signature(self.name, input_signatures, result, kwargs)
+            return result
 
-                async with _ProfilingContext(name, reset_peak_memory=reset_peak_memory):
-                    result = await func(*args, **kwargs)
+        return cast(F, async_wrapper if is_async else sync_wrapper)
 
-                # Capture output signature after execution
-                output_signature = _extract_signature_from_value(result) if isinstance(result, torch.Tensor) else None
-
-                # Record signature to registry (only in main process)
-                if not _IS_WORKER_PROCESS and input_signatures:
-                    stage_sig = StageIOSignature(
-                        stage_name=name,
-                        input_signatures=input_signatures,
-                        output_signature=output_signature if isinstance(output_signature, TensorSignature) else None,
-                        metadata=_extract_metadata_from_kwargs(kwargs),
-                    )
-                    GlobalTimingRegistry.get_instance().record_signature(stage_sig)
-
-                return result
-
-            return cast(F, async_wrapper)
-        else:
-
-            @wraps(func)
-            def sync_wrapper(*args, **kwargs):
-                # Capture input signatures before execution
-                input_signatures = _capture_input_signatures(args, kwargs, param_names)
-
-                with _ProfilingContext(name, reset_peak_memory=reset_peak_memory):
-                    result = func(*args, **kwargs)
-
-                # Capture output signature after execution
-                output_signature = _extract_signature_from_value(result) if isinstance(result, torch.Tensor) else None
-
-                # Record signature to registry (only in main process)
-                if not _IS_WORKER_PROCESS and input_signatures:
-                    stage_sig = StageIOSignature(
-                        stage_name=name,
-                        input_signatures=input_signatures,
-                        output_signature=output_signature if isinstance(output_signature, TensorSignature) else None,
-                        metadata=_extract_metadata_from_kwargs(kwargs),
-                    )
-                    GlobalTimingRegistry.get_instance().record_signature(stage_sig)
-
-                return result
-
-            return cast(F, sync_wrapper)
+    @property
+    def _ctx_kwargs(self) -> dict:
+        """Context kwargs for recreating context in wrapper."""
+        return {"reset_peak_memory": self.reset_peak_memory, "capture_memory": self.capture_memory}
 
 
 def _capture_input_signatures(args: tuple, kwargs: dict, param_names: list[str]) -> dict:
     """Capture input signatures from args and kwargs."""
-    input_signatures = {}
-
     # Skip 'self' parameter (first arg in methods)
     start_idx = 1 if param_names and param_names[0] == "self" else 0
-
-    # Extract from args using parameter names
-    for i, arg in enumerate(args[start_idx:], start=start_idx):
-        if i < len(param_names):
-            param_name = param_names[i]
-            input_signatures[param_name] = _extract_signature_from_value(arg)
-
-    # Extract from kwargs (overrides args if both present)
-    for key, value in kwargs.items():
-        input_signatures[key] = _extract_signature_from_value(value)
-
+    input_signatures = {
+        param_names[i]: _extract_signature_from_value(arg)
+        for i, arg in enumerate(args[start_idx:], start=start_idx)
+        if i < len(param_names)
+    }
+    input_signatures.update({k: _extract_signature_from_value(v) for k, v in kwargs.items()})
     return input_signatures
 
 
 def _extract_metadata_from_kwargs(kwargs: dict) -> dict:
     """Extract metadata (non-tensor numeric/string parameters) for harness."""
-    metadata = {}
-    for key, value in kwargs.items():
-        if isinstance(value, (int, float, str, bool)) and not isinstance(value, torch.Tensor):
-            metadata[key] = value
-    return metadata
+    return {k: v for k, v in kwargs.items() if isinstance(v, (int, float, str, bool))}
+
+
+def _record_stage_signature(
+    name: str,
+    input_signatures: dict,
+    result: Any,
+    kwargs: dict,
+) -> None:
+    """Record stage I/O signature to registry (main process only)."""
+    if _IS_WORKER_PROCESS or not input_signatures:
+        return
+    output_sig = _extract_signature_from_value(result) if isinstance(result, torch.Tensor) else None
+    GlobalTimingRegistry.get_instance().record_signature(
+        StageIOSignature(
+            stage_name=name,
+            input_signatures=input_signatures,
+            output_signature=output_sig if isinstance(output_sig, TensorSignature) else None,
+            metadata=_extract_metadata_from_kwargs(kwargs),
+        )
+    )
 
 
 class _NullContext:

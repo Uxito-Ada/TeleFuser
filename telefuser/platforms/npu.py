@@ -71,3 +71,8 @@ class NPUPlatform(BasePlatform):
     @staticmethod
     def set_device(device: int | str | torch.device) -> None:
         return torch.npu.set_device(device)
+
+    @staticmethod
+    def get_device_total_memory(device: int | str | torch.device | None = None) -> int:
+        """Get total NPU memory in bytes."""
+        return torch.npu.get_device_properties(device).total_memory

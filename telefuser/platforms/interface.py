@@ -92,3 +92,8 @@ class BasePlatform(ABC):
     def get_device_capability(*args, **kwargs):
         """Get device compute capability."""
         raise NotImplementedError
+
+    @staticmethod
+    def get_device_total_memory(*args, **kwargs):
+        """Get total device memory in bytes."""
+        raise NotImplementedError
