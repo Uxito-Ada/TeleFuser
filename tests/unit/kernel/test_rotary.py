@@ -7,10 +7,7 @@ Test markers:
 import pytest
 import torch
 
-from telefuser.kernel.triton import (
-    apply_rotary_embedding,
-    apply_rotary_embedding_inplace,
-)
+from telefuser.kernel.triton import apply_rotary_embedding
 
 # =============================================================================
 # Reference Implementations
@@ -116,30 +113,6 @@ class TestRotaryEmbedding:
         output = apply_rotary_embedding(x, cos, sin)
 
         assert output.shape == x.shape
-
-    def test_apply_rotary_embedding_inplace(self, cuda_device):
-        """Test in-place RoPE kernel."""
-        dtype = torch.bfloat16
-        batch_size, seq_len, num_heads, head_size = 2, 16, 8, 64
-
-        torch.manual_seed(42)
-
-        x = torch.randn(batch_size, seq_len, num_heads, head_size, dtype=dtype, device=cuda_device)
-        x_copy = x.clone()
-
-        cos = torch.randn(seq_len, head_size // 2, dtype=dtype, device=cuda_device)
-        sin = torch.randn(seq_len, head_size // 2, dtype=dtype, device=cuda_device)
-
-        # Out-of-place version
-        output_oop = apply_rotary_embedding(x_copy, cos, sin)
-
-        # In-place version
-        x_ptr = x.data_ptr()
-        apply_rotary_embedding_inplace(x, cos, sin)
-
-        # Check in-place modification
-        assert x.data_ptr() == x_ptr
-        assert torch.allclose(x, output_oop, atol=1e-2, rtol=1e-2)
 
     def test_rotary_embedding_identity(self, cuda_device):
         """Test that RoPE with cos=1, sin=0 is identity."""

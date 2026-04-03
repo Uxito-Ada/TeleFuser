@@ -18,7 +18,7 @@ from .norm import (
     triton_one_pass_rms_norm,
 )
 from .quant import per_token_dequant_fp8, per_token_quant_fp8
-from .rotary import apply_rotary_embedding, apply_rotary_embedding_inplace
+from .rotary import apply_rotary_embedding
 from .scale_shift import (
     fused_layernorm_scale_shift_gate_select01,
     fused_residual_layernorm_scale_shift_gate_select01,

@@ -159,26 +159,3 @@ def apply_rotary_embedding(
     )
 
     return output_reshaped.view(x.shape)
-
-
-def apply_rotary_embedding_inplace(x: torch.Tensor, cos: torch.Tensor, sin: torch.Tensor) -> None:
-    """Apply Rotary Position Embedding (RoPE) in-place.
-
-    Args:
-        x: Input tensor to be modified in-place
-        cos: Cosine values
-        sin: Sine values
-    """
-    if x.dim() > 3:
-        bsz, num_tokens, num_heads, head_size = x.shape
-    else:
-        num_tokens, num_heads, head_size = x.shape
-        bsz = 1
-
-    assert head_size % 2 == 0, "head_size must be divisible by 2"
-
-    x_reshaped = x.view(-1, head_size)
-
-    _apply_rotary_embedding_kernel(
-        x_reshaped, cos, sin, num_heads, head_size, num_tokens, bsz, interleaved=False, is_inplace=True
-    )

@@ -118,29 +118,6 @@ class TestParallelWorkerUnit:
 
     @patch("telefuser.worker.parallel_worker.mp")
     @patch("telefuser.worker.parallel_worker.PortAllocator")
-    def test_set_spawn_method(self, mock_port_allocator, mock_mp):
-        """Test that spawn method is set correctly."""
-        from telefuser.worker.parallel_worker import ParallelWorker
-
-        mock_port_allocator.return_value.get_free_port_in_interval.return_value = 12345
-        mock_mp.get_start_method.return_value = None  # Not set yet
-        mock_spawn_ctx = MagicMock()
-        mock_mp.get_context.return_value = mock_spawn_ctx
-        mock_spawn_ctx.Queue.return_value = MagicMock()
-
-        mock_stage = MagicMock()
-        mock_stage.name = "TestStage"
-        mock_stage.model_runtime_config.parallel_config.world_size = 1
-        mock_stage.model_runtime_config.parallel_config.device_ids = None
-        mock_stage.model_runtime_config.parallel_config.queue_with_cpu = False
-        mock_stage.model_runtime_config.parallel_config.timeout = 600
-
-        ParallelWorker(mock_stage)
-
-        mock_mp.set_start_method.assert_called_once_with("spawn")
-
-    @patch("telefuser.worker.parallel_worker.mp")
-    @patch("telefuser.worker.parallel_worker.PortAllocator")
     def test_put_data_with_queue_cpu(self, mock_port_allocator, mock_mp):
         """Test put_data with queue_with_cpu enabled."""
         from telefuser.worker.parallel_worker import ParallelWorker

@@ -11,7 +11,6 @@ import torch.nn as nn
 from telefuser.kernel.triton import (
     fused_add_rms_norm,
     norm_infer,
-    rms_norm,
     triton_one_pass_rms_norm,
 )
 
@@ -74,7 +73,7 @@ class TestRMSNorm:
         weight = torch.randn(hidden_size, dtype=dtype, device=cuda_device)
 
         # Triton kernel output
-        output_triton = rms_norm(x, weight)
+        output_triton = triton_one_pass_rms_norm(x, weight)
 
         # PyTorch reference
         output_torch = torch_rms_norm(x.float(), weight.float()).to(dtype)
@@ -90,7 +89,7 @@ class TestRMSNorm:
 
         x_ones = torch.ones(2, 10, hidden_size, dtype=dtype, device=cuda_device)
         weight = torch.ones(hidden_size, dtype=dtype, device=cuda_device)
-        output = rms_norm(x_ones, weight)
+        output = triton_one_pass_rms_norm(x_ones, weight)
 
         # RMS of all ones is 1, so output should be ones
         assert torch.allclose(output, x_ones, atol=1e-3)
@@ -102,7 +101,7 @@ class TestRMSNorm:
 
         x_zeros = torch.zeros(2, 10, hidden_size, dtype=dtype, device=cuda_device)
         weight = torch.ones(hidden_size, dtype=dtype, device=cuda_device)
-        output = rms_norm(x_zeros, weight)
+        output = triton_one_pass_rms_norm(x_zeros, weight)
 
         assert not torch.isnan(output).any()
 
@@ -210,7 +209,7 @@ class TestRMSNormAgainstTorch:
         output_nn = nn_norm(x)
 
         # Our kernel
-        output_kernel = rms_norm(x, nn_norm.weight)
+        output_kernel = triton_one_pass_rms_norm(x, nn_norm.weight)
 
         assert torch.allclose(output_kernel, output_nn, atol=1e-2, rtol=1e-2)
 
