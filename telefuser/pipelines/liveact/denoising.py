@@ -21,6 +21,7 @@ from telefuser.metrics import with_metrics
 from telefuser.schedulers.flow_match import FlowMatchScheduler
 from telefuser.utils.logging import logger
 from telefuser.utils.profiler import ProfilingContext4Debug
+from telefuser.utils.torch_compile import apply_compile_config
 
 
 @dataclass
@@ -66,6 +67,24 @@ class LiveActDenoisingStage(BaseStage):
         self.dit = module_manager.fetch_module("liveact_dit")
         self.dit.set_attention_config(model_runtime_config.attention_config)
         self.model_names = ["dit"]
+
+        # Enable FP8 GEMM for FFN layers if quant_config is set
+        quant_config = model_runtime_config.quant_config
+        if quant_config.enabled:
+            try:
+                from telefuser.ops.fp8_gemm import FP8GemmOptions, enable_fp8_gemm
+
+                enable_fp8_gemm(self.dit, options=FP8GemmOptions())
+                logger.info("✓ FP8 GEMM enabled for DiT FFN layers")
+            except ImportError:
+                logger.warning("✗ FP8 GEMM not available, skipping")
+
+        # Enable torch.compile for DiT if compile_config is set
+        compile_config = model_runtime_config.compile_config
+        if compile_config.enabled:
+            apply_compile_config(compile_config)
+            self.dit.compile()
+            logger.info("✓ torch.compile enabled for DiT")
 
         # Get model architecture params from dit
         self.num_layers = len(self.dit.blocks)

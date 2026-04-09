@@ -57,33 +57,24 @@ class LiveActPipelineConfig:
 
     # Audio parameters
     audio_window: int = 5
-    audio_cfg: float = 1.0
-    fps: int = 24
-
-    # Stream audio mode: True = re-encode per iteration (precise), False = pre-encode (faster)
-    stream_audio: bool = True
+    stream_audio: bool = True  # True = re-encode per iteration (precise), False = pre-encode (faster)
 
     # Generation parameters
-    num_inference_steps: int = 3
     block_sizes: tuple[int, int] = (6, 8)
 
-    # Model architecture constants
-    vae_stride: tuple[int, int, int] = (4, 8, 8)  # temporal, height, width
-    patch_size: tuple[int, int, int] = (1, 2, 2)  # temporal, height, width
-    latent_channels: int = 16
-
-    # KV cache parameters (for 480x832: bfloat16 ~200GB, fp8 ~100GB)
+    # KV cache parameters
     fp8_kv_cache: bool = False
     offload_cache: bool = True
     mean_memory: bool = False
 
-    # Optimization flags
-    enable_fp8_gemm: bool = True
-    enable_torch_compile: bool = True
-
     # Feature flags
-    enable_vae_parallel: bool = False
     enable_metrics: bool = False
+
+
+# Model architecture constants (hardcoded, not configurable)
+VAE_STRIDE = (4, 8, 8)  # temporal, height, width
+PATCH_SIZE = (1, 2, 2)  # temporal, height, width
+LATENT_CHANNELS = 16
 
 
 class LiveActPipeline(BasePipeline):
@@ -147,18 +138,6 @@ class LiveActPipeline(BasePipeline):
             audio_window=config.audio_window,
         )
 
-        # Enable FP8 GEMM for DiT FFN layers before creating denoise stage
-        if config.enable_fp8_gemm:
-            try:
-                from telefuser.ops.fp8_gemm import FP8GemmOptions, enable_fp8_gemm
-
-                dit = module_manager.fetch_module("liveact_dit")
-                if dit is not None:
-                    enable_fp8_gemm(dit, options=FP8GemmOptions())
-                    logger.info("✓ FP8 GEMM enabled for DiT FFN layers")
-            except ImportError:
-                logger.warning("✗ FP8 GEMM not available, skipping")
-
         self.denoise_stage = LiveActDenoisingStage(
             "denoise",
             module_manager,
@@ -169,16 +148,6 @@ class LiveActPipeline(BasePipeline):
                 mean_memory=config.mean_memory,
             ),
         )
-
-        # Enable torch.compile for DiT (after denoise_stage is created so we can update its dit reference)
-        if config.enable_torch_compile:
-            import torch
-
-            compiled_dit = torch.compile(
-                self.denoise_stage.dit, mode="max-autotune-no-cudagraphs", backend="inductor", dynamic=False
-            )
-            self.denoise_stage.dit = compiled_dit
-            logger.info("✓ torch.compile enabled for DiT")
 
         if config.enable_metrics:
             self.enable_metrics()
@@ -225,9 +194,9 @@ class LiveActPipeline(BasePipeline):
         seed: int | None = None,
         height: int = 480,
         width: int = 832,
-        fps: int | None = None,
-        num_inference_steps: int | None = None,
-        audio_cfg: float | None = None,
+        fps: int = 24,
+        num_inference_steps: int = 3,
+        audio_cfg: float = 1.0,
     ) -> List[Image.Image]:
         """Generate talking head video from image and audio.
 
@@ -241,18 +210,13 @@ class LiveActPipeline(BasePipeline):
             seed: Random seed
             height: Video height
             width: Video width
-            fps: Target fps (default from config)
+            fps: Target fps
             num_inference_steps: Number of denoising steps
             audio_cfg: Audio CFG scale
 
         Returns:
             List of PIL Images representing the generated video frames
         """
-        # Use config defaults if not specified
-        fps = fps or self.config.fps
-        num_inference_steps = num_inference_steps or self.config.num_inference_steps
-        audio_cfg = audio_cfg if audio_cfg is not None else self.config.audio_cfg
-
         logger.info(f"Generating LiveAct video: {width}x{height}, fps={fps}")
         height, width = self.check_resize_height_width(height, width)
 
@@ -263,7 +227,7 @@ class LiveActPipeline(BasePipeline):
         clip_fea = self.clip_encoding_stage.process(input_image_tensor)
 
         stream_audio = self.config.stream_audio
-        audio_embedding, audio_duration = self.audio_encoding_stage.process(
+        _, audio_duration = self.audio_encoding_stage.process(
             audio_path=audio_path,
             audio=audio,
             sr=audio_sr,
@@ -276,17 +240,16 @@ class LiveActPipeline(BasePipeline):
         else:
             logger.info("Using pre-encoded mode: slice embedding per iteration")
 
-        vae_stride = self.config.vae_stride
         blksz_lst = self.config.block_sizes
-        frame_num_per_iter = (sum(blksz_lst) - 1) * vae_stride[0] + 1
-        iter_total_num = int(audio_duration / (vae_stride[0] * blksz_lst[-1] / fps)) + 1
+        frame_num_per_iter = (sum(blksz_lst) - 1) * VAE_STRIDE[0] + 1
+        iter_total_num = int(audio_duration / (VAE_STRIDE[0] * blksz_lst[-1] / fps)) + 1
 
         logger.info(f"Audio duration: {audio_duration:.2f}s, iterations: {iter_total_num}")
 
         num_frames = frame_num_per_iter
         y = self.prepare_vae_latent(input_image_tensor, height, width, num_frames)
 
-        ref_target_masks = torch.ones(3, height // vae_stride[1], width // vae_stride[2]).to(
+        ref_target_masks = torch.ones(3, height // VAE_STRIDE[1], width // VAE_STRIDE[2]).to(
             self.device, self.torch_dtype
         )
 
@@ -299,11 +262,10 @@ class LiveActPipeline(BasePipeline):
 
             logger.info(f"Generating segment {iteration + 1}/{iter_total_num}")
 
-            # Match original generate.py:309-312
             audio_start_idx, audio_end_idx = 0, num_frames
-            if (iteration - 1) * blksz_lst[-1] * vae_stride[0] > 0:
-                audio_start_idx += (iteration - 1) * blksz_lst[-1] * vae_stride[0]
-                audio_end_idx += (iteration - 1) * blksz_lst[-1] * vae_stride[0]
+            if (iteration - 1) * blksz_lst[-1] * VAE_STRIDE[0] > 0:
+                audio_start_idx += (iteration - 1) * blksz_lst[-1] * VAE_STRIDE[0]
+                audio_end_idx += (iteration - 1) * blksz_lst[-1] * VAE_STRIDE[0]
 
             if stream_audio:
                 audio_emb_for_dit = self.audio_encoding_stage.process_stream_audio_segment(
@@ -321,7 +283,7 @@ class LiveActPipeline(BasePipeline):
             y_cut = y[:, :, : num_frames // 4 + 1, ...]
 
             f = iteration if iteration <= 1 else 1
-            latent_shape = (self.config.latent_channels, blksz_lst[f], height // vae_stride[1], width // vae_stride[2])
+            latent_shape = (LATENT_CHANNELS, blksz_lst[f], height // VAE_STRIDE[1], width // VAE_STRIDE[2])
             latent = torch.randn(latent_shape, dtype=self.torch_dtype, device=self.device)
 
             if seed is not None:
@@ -353,7 +315,7 @@ class LiveActPipeline(BasePipeline):
             torch.cuda.synchronize()
             iter_end_time = time.time()
 
-            generated_frames = blksz_lst[f] * vae_stride[0]
+            generated_frames = blksz_lst[f] * VAE_STRIDE[0]
             generated_duration_ms = generated_frames / fps * 1000
             iter_cost_ms = (iter_end_time - iter_start_time) * 1000
 
@@ -368,7 +330,7 @@ class LiveActPipeline(BasePipeline):
         total_end_time = time.time()
         total_cost_s = total_end_time - total_start_time if total_start_time else 0
 
-        total_frames = blksz_lst[0] * vae_stride[0] + (iter_total_num - 1) * blksz_lst[1] * vae_stride[0]
+        total_frames = blksz_lst[0] * VAE_STRIDE[0] + (iter_total_num - 1) * blksz_lst[1] * VAE_STRIDE[0]
         total_duration_s = total_frames / fps
 
         logger.info(
