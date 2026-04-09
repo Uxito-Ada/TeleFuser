@@ -32,6 +32,7 @@ pytestmark = [
     pytest.mark.multi_gpu,
 ]
 
+
 # Check if spawn-based multiprocessing tests can run
 # On Linux, pytest runs in fork context by default, which is incompatible with mp.spawn
 # when passing Queue objects (SemLocks can't be shared across contexts)
@@ -45,6 +46,7 @@ def _can_run_spawn_tests():
         return False
 
     import multiprocessing
+
     # If we're already in spawn context, it's fine
     if multiprocessing.get_start_method() == "spawn":
         return True

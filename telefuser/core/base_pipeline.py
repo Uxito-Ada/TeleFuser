@@ -46,9 +46,10 @@ class BasePipeline(ABC):
 
             @wraps(original_call)
             def wrapped_call(self, *args, **kwargs):
-                from telefuser.utils.profiler import reset_timing_registry
                 import gc
+
                 from telefuser.platforms import current_platform
+                from telefuser.utils.profiler import reset_timing_registry
 
                 reset_timing_registry()
                 self._print_call_banner(args, kwargs)

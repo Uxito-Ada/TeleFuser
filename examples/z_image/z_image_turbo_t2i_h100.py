@@ -80,7 +80,11 @@ def run(
 @click.command()
 @click.option("--aspect_ratio", "-ar", default="16:9", help="Image ratio such as 1:1, 16:9", type=str)
 @click.option("--gpu_num", default=1, help="Number of GPUs to use", type=int)
-@click.option("--prompt", default="Young Chinese woman in red Hanfu, intricate embroidery. Impeccable makeup, red floral forehead pattern. Elaborate high bun, golden phoenix headdress, red flowers, beads. Holds round folding fan with lady, trees, bird. Neon lightning-bolt lamp (⚡️), bright yellow glow, above extended left palm. Soft-lit outdoor night background, silhouetted tiered pagoda (西安大雁塔), blurred colorful distant lights.", help="Custom prompt text")
+@click.option(
+    "--prompt",
+    default="Young Chinese woman in red Hanfu, intricate embroidery. Impeccable makeup, red floral forehead pattern. Elaborate high bun, golden phoenix headdress, red flowers, beads. Holds round folding fan with lady, trees, bird. Neon lightning-bolt lamp (⚡️), bright yellow glow, above extended left palm. Soft-lit outdoor night background, silhouetted tiered pagoda (西安大雁塔), blurred colorful distant lights.",
+    help="Custom prompt text",
+)
 @click.option("--output", default=get_example_name(__file__, "png"), help="Output image filename")
 def main(aspect_ratio, gpu_num, prompt, output):
     pipeline = get_pipeline(gpu_num)
