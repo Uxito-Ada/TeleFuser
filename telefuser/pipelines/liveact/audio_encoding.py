@@ -18,7 +18,6 @@ import torch
 import torchaudio
 import torchaudio.transforms as T
 from einops import rearrange
-from transformers import Wav2Vec2FeatureExtractor
 
 from telefuser.core.base_stage import BaseStage, with_model_offload
 from telefuser.core.config import ModelRuntimeConfig
@@ -50,7 +49,7 @@ class AudioEncodingStage(BaseStage):
     ):
         super().__init__(name, model_runtime_config)
         self.audio_encoder = module_manager.fetch_module("wav2vec2")
-        self.feature_extractor = module_manager.fetch_module("wav2vec2_feature_extractor")
+        self.audio_processor = self.audio_encoder.audio_processor  # Integrated audio preprocessor
         self.audio_window = audio_window
         self.vae_scale = vae_scale
         self.model_names = ["audio_encoder"]
@@ -138,7 +137,7 @@ class AudioEncodingStage(BaseStage):
             Audio embeddings [T, blocks, channels]
         """
         # Prepare input for wav2vec2
-        audio_feature = self.feature_extractor(
+        audio_feature = self.audio_processor(
             audio.cpu().numpy(),
             sampling_rate=16000,
             return_tensors="pt",

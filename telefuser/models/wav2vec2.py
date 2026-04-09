@@ -1,21 +1,50 @@
-import torch
+"""Wav2Vec2 model with integrated feature extractor for audio encoding."""
+
 import torch.nn.functional as F
-from transformers import Wav2Vec2Config, Wav2Vec2Model
+from transformers import Wav2Vec2Config, Wav2Vec2FeatureExtractor
+from transformers import Wav2Vec2Model as HF_Wav2Vec2Model
 from transformers.modeling_outputs import BaseModelOutput
+
+__all__ = ["Wav2Vec2Model"]
 
 
 def linear_interpolation(features, seq_len):
+    """Interpolate features to target sequence length."""
     features = features.transpose(1, 2)
     output_features = F.interpolate(features, size=seq_len, align_corners=True, mode="linear")
     return output_features.transpose(1, 2)
 
 
-# the implementation of Wav2Vec2Model is borrowed from
-# https://github.com/huggingface/transformers/blob/HEAD/src/transformers/models/wav2vec2/modeling_wav2vec2.py
-# initialize our encoder with the pre-trained wav2vec 2.0 weights.
-class Wav2Vec2Model(Wav2Vec2Model):
-    def __init__(self, config: Wav2Vec2Config):
-        super().__init__(config)
+class Wav2Vec2Model(HF_Wav2Vec2Model):
+    """Wav2Vec2 model with integrated audio preprocessor.
+
+    Extends transformers Wav2Vec2Model with:
+    - Integrated audio_processor (Wav2Vec2FeatureExtractor) for audio preprocessing
+    - from_pretrained() that loads both model and audio processor automatically
+    - Custom forward with linear interpolation for sequence length matching
+
+    Note: self.feature_extractor is the internal CNN encoder (inherited from HF).
+          self.audio_processor is the Wav2Vec2FeatureExtractor for audio preprocessing.
+    """
+
+    audio_processor: Wav2Vec2FeatureExtractor  # Audio preprocessor (normalization, padding, etc.)
+
+    @classmethod
+    def from_pretrained(cls, pretrained_model_name_or_path, *args, **kwargs):
+        """Load model with integrated audio processor from pretrained.
+
+        Args:
+            pretrained_model_name_or_path: Path to pretrained model
+            **kwargs: Additional arguments passed to HF from_pretrained
+
+        Returns:
+            Wav2Vec2Model with audio_processor attribute set
+        """
+        model = super().from_pretrained(pretrained_model_name_or_path, *args, **kwargs)
+
+        # Load and attach audio preprocessor
+        model.audio_processor = Wav2Vec2FeatureExtractor.from_pretrained(pretrained_model_name_or_path, *args, **kwargs)
+        return model
 
     def forward(
         self,
@@ -39,7 +68,6 @@ class Wav2Vec2Model(Wav2Vec2Model):
         extract_features = linear_interpolation(extract_features, seq_len=seq_len)
 
         if attention_mask is not None:
-            # compute reduced attention_mask corresponding to feature vectors
             attention_mask = self._get_feature_vector_attention_mask(
                 extract_features.shape[1], attention_mask, add_adapter=False
             )
@@ -70,15 +98,11 @@ class Wav2Vec2Model(Wav2Vec2Model):
             attentions=encoder_outputs.attentions,
         )
 
-    def feature_extract(
-        self,
-        input_values,
-        seq_len,
-    ):
+    def feature_extract(self, input_values, seq_len):
+        """Extract features from raw audio."""
         extract_features = self.feature_extractor(input_values)
         extract_features = extract_features.transpose(1, 2)
         extract_features = linear_interpolation(extract_features, seq_len=seq_len)
-
         return extract_features
 
     def encode(
@@ -90,6 +114,7 @@ class Wav2Vec2Model(Wav2Vec2Model):
         output_hidden_states=None,
         return_dict=None,
     ):
+        """Encode pre-extracted features through transformer."""
         self.config.output_attentions = True
 
         output_hidden_states = (
@@ -98,7 +123,6 @@ class Wav2Vec2Model(Wav2Vec2Model):
         return_dict = return_dict if return_dict is not None else self.config.use_return_dict
 
         if attention_mask is not None:
-            # compute reduced attention_mask corresponding to feature vectors
             attention_mask = self._get_feature_vector_attention_mask(
                 extract_features.shape[1], attention_mask, add_adapter=False
             )

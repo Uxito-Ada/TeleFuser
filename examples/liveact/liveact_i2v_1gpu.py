@@ -19,7 +19,6 @@ import time
 import click
 import torch
 from PIL import Image
-from transformers import Wav2Vec2FeatureExtractor
 
 from telefuser.core.config import AttentionConfig, AttnImplType, CompileConfig, QuantConfig, QuantType
 from telefuser.core.module_manager import ModuleManager
@@ -57,7 +56,7 @@ def get_pipeline(ckpt_dir: str, wav2vec_dir: str):
 
     mm.load_models(
         [
-            os.path.join(ckpt_dir, "diffusion_pytorch_model.safetensors"),
+            os.path.join(ckpt_dir, "diffusion_pytorch_model-*.safetensors"),
         ],
         torch_dtype=torch_dtype,
     )
@@ -70,14 +69,11 @@ def get_pipeline(ckpt_dir: str, wav2vec_dir: str):
         torch_dtype=torch_dtype,
     )
 
-    # Load Wav2Vec2 Audio Encoder
+    # Load Wav2Vec2 Audio Encoder (model includes integrated audio_processor)
     audio_encoder = Wav2Vec2Model.from_pretrained(wav2vec_dir, local_files_only=True, torch_dtype=torch_dtype).eval()
     audio_encoder.feature_extractor._freeze_parameters()
 
-    wav2vec_feature_extractor = Wav2Vec2FeatureExtractor.from_pretrained(wav2vec_dir, local_files_only=True)
-
     mm.add_module(audio_encoder, "wav2vec2")
-    mm.add_module(wav2vec_feature_extractor, "wav2vec2_feature_extractor")
 
     pipeline = LiveActPipeline(device="cuda", torch_dtype=torch_dtype)
     config = LiveActPipelineConfig()
