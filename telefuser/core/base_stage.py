@@ -20,28 +20,42 @@ F = TypeVar("F", bound=Callable[..., Any])
 
 
 def with_model_offload(model_names: list[str]) -> Callable[[F], F]:
-    """Decorator for automatic model load/unload around stage execution."""
+    """Decorator for automatic model load/unload around stage execution.
+
+    Optimized: Skip wrapper overhead when models are already on device (NO_CPU_OFFLOAD mode).
+    """
 
     def decorator(func: F) -> F:
         @functools.wraps(func)
         def wrapper(self: BaseStage, *args: Any, **kwargs: Any) -> Any:
+            offload_type = self.model_runtime_config.offload_config.offload_type
+
+            # Fast path: Models already on device, no offloading needed
+            # Skip all overhead when in NO_CPU_OFFLOAD mode and models are loaded
+            if self.onload_models_flag and offload_type == WeightOffloadType.NO_CPU_OFFLOAD:
+                return func(self, *args, **kwargs)
+
             rank = 0
             if torch.distributed.is_available() and torch.distributed.is_initialized():
                 rank = torch.distributed.get_rank()
 
             pin_memory = self.model_runtime_config.offload_config.pin_cpu_memory
-            offload_type = self.model_runtime_config.offload_config.offload_type
 
             # Load models to device if not already loaded or if offloading is enabled
-            if not self.onload_models_flag or offload_type != WeightOffloadType.NO_CPU_OFFLOAD:
-                for model_name in model_names:
-                    logger.info(f"onload {model_name} to {self.device} with rank {rank}")
-                    model = getattr(self, model_name)
-                    if model is not None:
-                        if hasattr(model, "onload_device"):
-                            model.onload_device(self.device, non_blocking=pin_memory)
-                        else:
-                            model.to(self.device)
+            models_to_move = []
+            for model_name in model_names:
+                model = getattr(self, model_name)
+                if model is not None and not self.onload_models_flag:
+                    models_to_move.append((model_name, model))
+
+            # Batch log for models that need to be moved (only log once, not per model)
+            if models_to_move:
+                logger.info(f"onload {model_names} to {self.device} with rank {rank}")
+                for model_name, model in models_to_move:
+                    if hasattr(model, "onload_device"):
+                        model.onload_device(self.device, non_blocking=pin_memory)
+                    else:
+                        model.to(self.device)
                 self.onload_models_flag = True
 
             try:
@@ -49,10 +63,10 @@ def with_model_offload(model_names: list[str]) -> Callable[[F], F]:
             finally:
                 # Offload models after execution if offloading is enabled
                 if offload_type != WeightOffloadType.NO_CPU_OFFLOAD:
+                    logger.info(f"offload {model_names} with rank {rank}")
                     for model_name in model_names:
                         model = getattr(self, model_name)
                         if model is not None:
-                            logger.info(f"offload {model_name} with rank {rank}")
                             if hasattr(model, "offload_device"):
                                 model.offload_device(pin_memory=pin_memory)
                             else:

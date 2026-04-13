@@ -88,6 +88,7 @@ def get_pipeline(gpu_num: int, ckpt_dir: str, wav2vec_dir: str):
     config.dit_config.attention_config = PPL_CONFIG["attention_config"]
     config.dit_config.quant_config = PPL_CONFIG["quant_config"]
     config.dit_config.compile_config = PPL_CONFIG["compile_config"]
+    config.vae_config.compile_config = PPL_CONFIG["compile_config"]
 
     # Configure SP parallelism for multi-GPU
     if gpu_num > 1:

@@ -70,7 +70,10 @@ class LiveActDenoisingStage(BaseStage):
     ):
         super().__init__(name, model_runtime_config)
         self.dit = module_manager.fetch_module("liveact_dit")
-        self.dit.set_attention_config(model_runtime_config.attention_config)
+        # set_attention_config only exists in TeleFuser's LiveActDiT
+        # Original SoulX-LiveAct WanModel uses SageAttention directly
+        if hasattr(self.dit, "set_attention_config"):
+            self.dit.set_attention_config(model_runtime_config.attention_config)
         self.model_names = ["dit"]
 
         # Enable FP8 GEMM and torch.compile only in single GPU mode
@@ -81,7 +84,13 @@ class LiveActDenoisingStage(BaseStage):
 
         if parallel_cfg.world_size == 1:
             # Single GPU: enable optimizations in __init__
-            if quant_config.enabled:
+            # Note: For original SoulX-LiveAct WanModel, FP8 and compile are already done in example
+            # Only apply if dit doesn't have _is_external_model flag (TeleFuser's model)
+            # Order matches original generate.py: FP8 -> eval -> compile -> freqs.to(device) ->
+            #  model.to(device) -> freeze
+
+            # 1. Enable FP8 GEMM (same as original generate.py)
+            if quant_config.enabled and not hasattr(self.dit, "_is_external_model"):
                 try:
                     from telefuser.ops.fp8_gemm import FP8GemmOptions, enable_fp8_gemm
 
@@ -90,11 +99,29 @@ class LiveActDenoisingStage(BaseStage):
                 except ImportError:
                     logger.warning("✗ FP8 GEMM not available, skipping")
 
-            if compile_config.enabled:
-                apply_compile_config(compile_config)
-                compile_kwargs = compile_config.get_compile_kwargs()
-                self.dit = torch.compile(self.dit, **compile_kwargs)
-                logger.info(f"✓ torch.compile enabled for DiT with {compile_kwargs}")
+            # 2. torch.compile (exact same approach as original generate.py)
+            # Original: torch.compile(model, mode="max-autotune-no-cudagraphs", backend="inductor", dynamic=False)
+            if compile_config.enabled and not hasattr(self.dit, "_is_external_model"):
+                self.dit.eval()
+                self.dit = torch.compile(
+                    self.dit,
+                    mode="max-autotune-no-cudagraphs",
+                    backend="inductor",
+                    dynamic=False,
+                )
+                logger.info("✓ torch.compile enabled for DiT (max-autotune-no-cudagraphs, backend=inductor)")
+
+            # 3. Move freqs tensor to device (required for RoPE)
+            if hasattr(self.dit, "freqs"):
+                self.dit.freqs = self.dit.freqs.to(self.device)
+
+            # 4. Move model to device (same as original)
+            self.dit = self.dit.to(self.device)
+            self.onload_models_flag = True  # Mark as already loaded to skip decorator overhead
+
+            # 5. Freeze parameters (same as original)
+            for param in self.dit.parameters():
+                param.requires_grad = False
 
         # Get model architecture params from dit
         self.num_layers = len(self.dit.blocks)
@@ -119,11 +146,15 @@ class LiveActDenoisingStage(BaseStage):
         - FSDP for model sharding
         """
         parallel_cfg = self.model_runtime_config.parallel_config
-        self.dit.device_mesh = create_device_mesh_from_config(parallel_cfg)
-        self.dit.set_attention_config(self.model_runtime_config.attention_config)
+        # device_mesh and enable_usp only exist in TeleFuser's LiveActDiT
+        # Original SoulX-LiveAct uses xfuser for SP (handled externally)
+        if hasattr(self.dit, "device_mesh"):
+            self.dit.device_mesh = create_device_mesh_from_config(parallel_cfg)
+        if hasattr(self.dit, "set_attention_config"):
+            self.dit.set_attention_config(self.model_runtime_config.attention_config)
 
-        # Enable Ulysses Sequence Parallel
-        if parallel_cfg.sp_ulysses_degree > 1:
+        # Enable Ulysses Sequence Parallel (TeleFuser implementation)
+        if hasattr(self.dit, "enable_usp") and parallel_cfg.sp_ulysses_degree > 1:
             self.dit.enable_usp(self.dit.device_mesh)
 
         # Enable FSDP
@@ -192,7 +223,9 @@ class LiveActDenoisingStage(BaseStage):
         kv_cache_device = "cpu" if self.kv_cache_config.offload_cache else device
 
         # Get SP size for KV cache shape
-        sp_size = get_ulysses_world_size(self.dit.device_mesh) or 1
+        # Original WanModel doesn't have device_mesh, use sp_size=1
+        device_mesh = getattr(self.dit, "device_mesh", None)
+        sp_size = get_ulysses_world_size(device_mesh) or 1
         local_heads = self.num_heads // sp_size
 
         # Total KV cache tokens: 6 frames (compressed history summary)
@@ -240,130 +273,8 @@ class LiveActDenoisingStage(BaseStage):
         self._kv_cache_tokens_per_frame = None
         self._kv_cache_null_audio = None
 
-    def predict_noise(
-        self,
-        latent: torch.Tensor,
-        timestep: torch.Tensor,
-        context: torch.Tensor,
-        clip_fea: torch.Tensor,
-        audio_embedding: torch.Tensor,
-        y: torch.Tensor,
-        ref_target_masks: torch.Tensor | None,
-        kv_cache: dict,
-        start_idx: int,
-        end_idx: int,
-        skip_audio: bool = False,
-    ) -> torch.Tensor:
-        """Predict noise with audio cross-attention.
-
-        Args:
-            latent: Current latent [B, C, T, H, W]
-            timestep: Current timestep
-            context: Text embedding
-            clip_fea: CLIP visual features
-            audio_embedding: Audio embedding for cross-attention
-            y: VAE latent with mask
-            ref_target_masks: Reference target masks
-            kv_cache: KV cache dictionary
-            start_idx: Start index for KV cache
-            end_idx: End index for KV cache
-            skip_audio: Whether to skip audio cross-attention
-
-        Returns:
-            Predicted noise
-        """
-        return self.dit(
-            [latent],
-            t=timestep,
-            context=context,
-            clip_fea=clip_fea,
-            audio=audio_embedding,
-            y=y,
-            ref_target_masks=ref_target_masks,
-            kv_cache=kv_cache,
-            start_idx=start_idx,
-            end_idx=end_idx,
-            skip_audio=skip_audio,
-        )[0]
-
-    def predict_noise_with_audio_cfg(
-        self,
-        latent: torch.Tensor,
-        timestep: torch.Tensor,
-        context: torch.Tensor,
-        clip_fea: torch.Tensor,
-        audio_embedding: torch.Tensor,
-        y: torch.Tensor,
-        ref_target_masks: torch.Tensor | None,
-        kv_cache: dict,
-        kv_cache_null_audio: dict | None,
-        start_idx: int,
-        end_idx: int,
-        audio_cfg: float = 1.0,
-        step_idx: int = 0,
-    ) -> torch.Tensor:
-        """Predict noise with audio CFG.
-
-        Args:
-            latent: Current latent
-            timestep: Current timestep
-            context: Text embedding
-            clip_fea: CLIP visual features
-            audio_embedding: Audio embedding
-            y: VAE latent with mask
-            ref_target_masks: Reference target masks
-            kv_cache: KV cache for positive audio
-            kv_cache_null_audio: KV cache for null audio (CFG)
-            start_idx: Start index for KV cache
-            end_idx: End index for KV cache
-            audio_cfg: Audio CFG scale
-            step_idx: Current step index
-
-        Returns:
-            Predicted noise with audio CFG applied
-        """
-        # Run with audio
-        skip_audio = False
-        noise_pred = self.predict_noise(
-            latent,
-            timestep,
-            context,
-            clip_fea,
-            audio_embedding,
-            y,
-            ref_target_masks,
-            kv_cache,
-            start_idx,
-            end_idx,
-            skip_audio=skip_audio,
-        )
-
-        # Apply audio CFG if enabled and in steps 1, 2
-        if audio_cfg > 1.0 and step_idx in [1, 2] and kv_cache_null_audio is not None:
-            # Run with null audio
-            null_audio = torch.zeros_like(audio_embedding)
-            noise_pred_drop_audio = self.predict_noise(
-                latent,
-                timestep,
-                context,
-                clip_fea,
-                null_audio,
-                y,
-                ref_target_masks,
-                kv_cache_null_audio,
-                start_idx,
-                end_idx,
-                skip_audio=False,
-            )
-            # Apply CFG
-            noise_pred = noise_pred_drop_audio + audio_cfg * (noise_pred - noise_pred_drop_audio)
-
-        return noise_pred
-
     @with_model_offload(["dit"])
-    @ProfilingContext4Debug("liveact_denoise")
     @torch.inference_mode()
-    @with_metrics
     def process(
         self,
         latent: torch.Tensor,
@@ -379,20 +290,7 @@ class LiveActDenoisingStage(BaseStage):
     ) -> torch.Tensor:
         """Run denoising with audio cross-attention and KV cache.
 
-        Args:
-            latent: Initial latent [16, blksz, H', W']
-            context: Text embedding
-            clip_fea: CLIP visual features
-            audio_embedding: Audio embedding
-            y: VAE latent with mask [1, 17, T', H', W']
-            ref_target_masks: Reference target masks
-            tokens_per_frame: Number of tokens per frame (H/patch * W/patch)
-            audio_cfg: Audio CFG scale
-            num_inference_steps: Number of denoising steps
-            seed: Random seed
-
-        Returns:
-            Denoised latent
+        Same structure as original generate.py for optimal torch.compile performance.
         """
         blksz_lst = [6, 8]
 
@@ -427,28 +325,51 @@ class LiveActDenoisingStage(BaseStage):
 
         timestep_tensors = self._get_timestep_tensors()
 
+        # Direct dit calls (same as original generate.py) - no intermediate functions
         for i in tqdm(range(len(TIMESTEPS) - 1), desc="liveact denoise"):
             timestep = timestep_tensors[i]
 
             start_idx = sum(blksz_lst[:f]) * tokens_per_frame
             end_idx = sum(blksz_lst[: f + 1]) * tokens_per_frame
 
-            with torch.autocast(device_type=self.device_type, dtype=self.torch_dtype):
-                noise_pred = self.predict_noise_with_audio_cfg(
-                    latent=latent,
-                    timestep=timestep,
-                    context=context,
-                    clip_fea=clip_fea,
-                    audio_embedding=audio_embedding,
-                    y=y_slice,
-                    ref_target_masks=ref_target_masks,
-                    kv_cache=self.kv_cache[i],
-                    kv_cache_null_audio=kv_cache_null_audio[i] if kv_cache_null_audio else None,
-                    start_idx=start_idx,
-                    end_idx=end_idx,
-                    audio_cfg=audio_cfg,
-                    step_idx=i,
-                )
+            # Pack args into dict (same as original)
+            arg_c = {
+                "context": context,
+                "clip_fea": clip_fea,
+                "audio": audio_embedding,
+                "y": y_slice,
+                "ref_target_masks": ref_target_masks,
+                "start_idx": start_idx,
+                "end_idx": end_idx,
+            }
+
+            # Direct dit call (same as original: wan_i2v_model([latent], t=timestep, kv_cache=kv_cache[i], **arg_c)[0])
+            noise_pred = self.dit(
+                [latent],
+                t=timestep,
+                kv_cache=self.kv_cache[i],
+                skip_audio=False,
+                **arg_c,
+            )[0]
+
+            # Audio CFG (same as original)
+            if audio_cfg > 1.0 and i in [1, 2] and kv_cache_null_audio is not None:
+                arg_null_audio = {
+                    "context": context,
+                    "clip_fea": clip_fea,
+                    "audio": torch.zeros_like(audio_embedding),
+                    "y": y_slice,
+                    "ref_target_masks": ref_target_masks,
+                    "start_idx": start_idx,
+                    "end_idx": end_idx,
+                }
+                noise_pred_drop_audio = self.dit(
+                    [latent],
+                    t=timestep,
+                    kv_cache=kv_cache_null_audio[i],
+                    **arg_null_audio,
+                )[0]
+                noise_pred = noise_pred_drop_audio + audio_cfg * (noise_pred - noise_pred_drop_audio)
 
             dt = (TIMESTEPS[i] - TIMESTEPS[i + 1]) / 1000
             latent = latent + (-noise_pred) * dt
