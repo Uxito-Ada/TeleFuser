@@ -3,12 +3,14 @@ from __future__ import annotations
 from typing import Any
 
 import torch
+import torch.nn as nn
 
 from telefuser.core.base_stage import BaseStage, with_model_offload
 from telefuser.core.config import ModelRuntimeConfig
 from telefuser.core.module_manager import ModuleManager
 from telefuser.metrics import with_metrics
-from telefuser.models.wan_video_vae import WanVideoVAE
+from telefuser.models.wan_video_vae import WanVideoVAE, _convert_conv3d_to_channels_last_3d
+from telefuser.utils.logging import logger
 from telefuser.utils.profiler import ProfilingContext4Debug
 
 
@@ -29,6 +31,20 @@ class VAEStage(BaseStage):
         # Try Wan2.2 VAE first (48 channels), fallback to Wan2.1 VAE (16 channels)
         self.vae: WanVideoVAE = module_manager.fetch_module("wan_video_vae")
         self.model_names = ["vae"]
+
+        # Convert Conv3d weights to channels_last_3d for cuDNN optimization
+        # Must be done after load_state_dict (after fetch_module)
+        conv_count = _convert_conv3d_to_channels_last_3d(self.vae.model)
+        if conv_count > 0:
+            logger.info(f"VAE: Converted {conv_count} Conv3d weights to channels_last_3d format")
+
+        # Apply torch.compile to VAE encode/decode for better performance
+        compile_config = model_runtime_config.compile_config
+        if compile_config.enabled:
+            # Compile the unified decode method (used by all decode paths)
+            self.vae.decode = torch.compile(self.vae.decode)
+            self.vae.encode = torch.compile(self.vae.encode)
+            logger.info("✓ torch.compile enabled for VAE encode/decode")
 
     @ProfilingContext4Debug("vae encode image")
     def encode_image(
@@ -163,19 +179,41 @@ class VAEStage(BaseStage):
             tile_stride: Tile stride for tiled processing
 
         Returns:
+            Decoded video frames tensor on CPU
+        """
+        with torch.autocast(device_type=self.device_type, dtype=self.torch_dtype):
+            # Unified decode() handles both single and batched tensors
+            frames = self.vae.decode(
+                latents, device=self.device, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride
+            )
+        return frames
+
+    @ProfilingContext4Debug("vae decode video cached")
+    def decode_video_cached(
+        self,
+        latents: torch.Tensor,
+        is_first_clip: bool,
+        is_last_clip: bool,
+    ) -> torch.Tensor:
+        """Decode latents to video frames with persistent feature cache.
+
+        Uses cached intermediate features for streaming generation efficiency.
+        Critical for LiveAct streaming decode where segments share cached features.
+
+        Args:
+            latents: Latent tensor [C, T, H, W] or [1, C, T, H, W]
+            is_first_clip: If True, clear cache before decoding (first segment)
+            is_last_clip: If True, clear cache after decoding (last segment)
+
+        Returns:
             Decoded video frames tensor
         """
         with torch.autocast(device_type=self.device_type, dtype=self.torch_dtype):
-            # Convert tensor to list format expected by VAE decode
-            if latents.dim() == 5:
-                # [B, C, T, H, W] -> list of [C, T, H, W]
-                latent_list = [latents[i] for i in range(latents.shape[0])]
-            else:
-                # [C, T, H, W] -> single element list
-                latent_list = [latents]
-
-            frames = self.vae.decode(
-                latent_list, device=self.device, tiled=tiled, tile_size=tile_size, tile_stride=tile_stride
+            frames = self.vae.cached_decode_withflag(
+                latents,
+                device=self.device,
+                is_first_clip=is_first_clip,
+                is_last_clip=is_last_clip,
             )
         return frames
 
