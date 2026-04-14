@@ -5,6 +5,7 @@ Integration Test Runner
 This script starts the test server, runs tests against it, and then shuts it down.
 """
 
+import os
 import subprocess
 import sys
 import time
@@ -15,10 +16,14 @@ import requests
 
 def wait_for_server(url, timeout=30):
     """Wait for server to be ready."""
+    # Configure session to bypass proxy for localhost
+    session = requests.Session()
+    session.trust_env = False  # Don't use environment proxy settings
+
     start = time.time()
     while time.time() - start < timeout:
         try:
-            response = requests.get(f"{url}/v1/service/status", timeout=1)
+            response = session.get(f"{url}/v1/service/status", timeout=1)
             if response.status_code == 200:
                 return True
         except Exception:

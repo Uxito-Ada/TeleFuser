@@ -100,7 +100,8 @@ class BasePipeline(ABC):
 
         lines = [
             SEP,
-            f"{self._ANSI_BOLD}{self._ANSI_CYAN}Pipeline Config{self._ANSI_RESET}  {self._ANSI_DIM}{self.__class__.__name__}{self._ANSI_RESET}",
+            f"{self._ANSI_BOLD}{self._ANSI_CYAN}Pipeline Config{self._ANSI_RESET}  "
+            f"{self._ANSI_DIM}{self.__class__.__name__}{self._ANSI_RESET}",
         ]
 
         # Format config fields, only showing values that differ from defaults
@@ -171,7 +172,8 @@ class BasePipeline(ABC):
 
         lines = [
             SEP,
-            f"{self._ANSI_BOLD}{self._ANSI_YELLOW}Pipeline Call{self._ANSI_RESET}  {self._ANSI_DIM}{self.__class__.__name__}{self._ANSI_RESET}",
+            f"{self._ANSI_BOLD}{self._ANSI_YELLOW}Pipeline Call{self._ANSI_RESET}  "
+            f"{self._ANSI_DIM}{self.__class__.__name__}{self._ANSI_RESET}",
         ]
 
         # Format kwargs (primary parameters for pipeline calls)
@@ -207,7 +209,10 @@ class BasePipeline(ABC):
         if isinstance(value, str):
             # Truncate long strings
             if len(value) > 80:
-                return f"{self._ANSI_GREEN}{value[:80]}...{self._ANSI_RESET} {self._ANSI_DIM}({len(value)} chars){self._ANSI_RESET}"
+                return (
+                    f"{self._ANSI_GREEN}{value[:80]}...{self._ANSI_RESET} "
+                    f"{self._ANSI_DIM}({len(value)} chars){self._ANSI_RESET}"
+                )
             return f"{self._ANSI_GREEN}{value}{self._ANSI_RESET}"
         elif isinstance(value, bool):
             color = self._ANSI_GREEN if value else self._ANSI_YELLOW
@@ -215,7 +220,10 @@ class BasePipeline(ABC):
         elif isinstance(value, (int, float)):
             return f"{self._ANSI_BLUE}{value}{self._ANSI_RESET}"
         elif isinstance(value, torch.Tensor):
-            return f"{self._ANSI_CYAN}Tensor{self._ANSI_RESET}({self._ANSI_DIM}shape={list(value.shape)}, dtype={value.dtype}{self._ANSI_RESET})"
+            return (
+                f"{self._ANSI_CYAN}Tensor{self._ANSI_RESET}("
+                f"{self._ANSI_DIM}shape={list(value.shape)}, dtype={value.dtype}{self._ANSI_RESET})"
+            )
         elif isinstance(value, Image.Image):
             return f"{self._ANSI_CYAN}PIL.Image{self._ANSI_RESET}({self._ANSI_DIM}size={value.size}{self._ANSI_RESET})"
         elif isinstance(value, list):
