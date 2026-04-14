@@ -27,15 +27,8 @@ from telefuser.core.base_model import BaseModel
 from telefuser.core.config import AttentionConfig, AttnImplType
 from telefuser.distributed.parallel_shard import sequence_parallel_shard, sequence_parallel_unshard
 from telefuser.distributed.ulysses_comm import ulysses_gather_heads, ulysses_scatter_heads
+from telefuser.ops.attention import attention
 from telefuser.utils.logging import logger
-
-try:
-    from sageattention import sageattn
-
-    USE_SAGEATTN = True
-except ImportError:
-    USE_SAGEATTN = False
-    sageattn = None
 
 
 def sinusoidal_embedding_1d(dim: int, position: torch.Tensor) -> torch.Tensor:
@@ -178,6 +171,9 @@ class SingleStreamAttention(nn.Module):
         self.sp_rank = 0
         self.sp_size = 1
 
+        # Attention config - defaults to SAGE_ATTN for best performance
+        self._attn_config = AttentionConfig(attn_impl=AttnImplType.SAGE_ATTN_2_8_8)
+
     def forward(
         self,
         x: torch.Tensor,
@@ -202,15 +198,20 @@ class SingleStreamAttention(nn.Module):
         encoder_kv = encoder_kv.view(encoder_kv_shape)[start_f : start_f + B].permute((2, 0, 3, 1, 4))
         encoder_k, encoder_v = encoder_kv.unbind(0)  # [B, H, M, D]
 
-        # Direct SageAttention call (same as original)
-        if USE_SAGEATTN:
-            x = sageattn(q, encoder_k, encoder_v, tensor_layout="HND")
-        else:
-            x = F.scaled_dot_product_attention(q, encoder_k, encoder_v, is_causal=False)
+        # Audio cross-attention using unified ops (HND layout = BNSD)
+        x = attention(
+            q,
+            encoder_k,
+            encoder_v,
+            attention_config=self._attn_config,
+            input_layout="BNSD",
+            output_layout="BNSD",
+            is_causal=False,
+        )
 
         # Linear transform
         x_output_shape = (B, N, C)
-        x = x.transpose(1, 2)  # [B, N, H, D]
+        x = x.transpose(1, 2)  # [B, N, H, D] - convert BNSD to BSND for reshape
         x = x.reshape(x_output_shape)
         x = self.proj(x)
 
@@ -255,6 +256,9 @@ class WanSelfAttention(nn.Module):
         self.sp_flag = False
         self.device_mesh = None
         self.ulysses_group = None
+
+        # Attention config - defaults to SAGE_ATTN for best performance
+        self._attn_config = AttentionConfig(attn_impl=AttnImplType.SAGE_ATTN_2_8_8)
 
     def post_init(self, device):
         self.memory_proj_k = nn.Conv1d(self.dim, self.dim, kernel_size=5, stride=5, groups=self.dim, bias=False).to(
@@ -392,21 +396,16 @@ class WanSelfAttention(nn.Module):
         roped_query = apply_rope(q, q_freqs, q_seq_len).type_as(v)
         roped_key = apply_rope(k_full, k_freqs, k_seq_len).type_as(v)
 
-        # Direct SageAttention call (same as original) - NHD layout, NO transpose needed!
-        if USE_SAGEATTN:
-            x = sageattn(
-                roped_query,
-                roped_key[:, :end_idx, ...],
-                v_full[:, :end_idx, ...],
-                tensor_layout="NHD",
-                is_causal=False,
-            ).type_as(x)
-        else:
-            # SDPA fallback
-            q_t = roped_query.transpose(1, 2)
-            k_t = roped_key[:, :end_idx, ...].transpose(1, 2)
-            v_t = v_full[:, :end_idx, ...].transpose(1, 2)
-            x = F.scaled_dot_product_attention(q_t, k_t, v_t, is_causal=False).transpose(1, 2).type_as(x)
+        # Self-attention with KVCache - BSND layout (NHD in SageAttention terminology)
+        x = attention(
+            roped_query,
+            roped_key[:, :end_idx, ...],
+            v_full[:, :end_idx, ...],
+            attention_config=self._attn_config,
+            input_layout="BSND",
+            output_layout="BSND",
+            is_causal=False,
+        ).type_as(x)
 
         # Update cache after attention
         if start_idx != 0:
@@ -451,6 +450,9 @@ class WanI2VCrossAttention(nn.Module):
         self.v_img = nn.Linear(dim, dim)
         self.norm_k_img = WanRMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
 
+        # Attention config - defaults to SAGE_ATTN for best performance
+        self._attn_config = AttentionConfig(attn_impl=AttnImplType.SAGE_ATTN_2_8_8)
+
     def forward(
         self,
         x: torch.Tensor,
@@ -468,15 +470,25 @@ class WanI2VCrossAttention(nn.Module):
         k_img = self.norm_k_img(self.k_img(context_img)).view(b, -1, n, d)
         v_img = self.v_img(context_img).view(b, -1, n, d)
 
-        # Direct SageAttention call (same as original)
-        if USE_SAGEATTN:
-            img_x = sageattn(q, k_img, v_img, tensor_layout="NHD")
-            x = sageattn(q, k, v, tensor_layout="NHD")
-        else:
-            # SDPA fallback - use BNSD layout
-            q_t = q.transpose(1, 2)
-            img_x = F.scaled_dot_product_attention(q_t, k_img.transpose(1, 2), v_img.transpose(1, 2)).transpose(1, 2)
-            x = F.scaled_dot_product_attention(q_t, k.transpose(1, 2), v.transpose(1, 2)).transpose(1, 2)
+        # Cross-attention using unified ops - BSND layout (NHD)
+        img_x = attention(
+            q,
+            k_img,
+            v_img,
+            attention_config=self._attn_config,
+            input_layout="BSND",
+            output_layout="BSND",
+            is_causal=False,
+        )
+        x = attention(
+            q,
+            k,
+            v,
+            attention_config=self._attn_config,
+            input_layout="BSND",
+            output_layout="BSND",
+            is_causal=False,
+        )
 
         # output
         x = x.flatten(2)
@@ -1015,10 +1027,14 @@ class LiveActDiT(BaseModel):
     def set_attention_config(self, attention_config: AttentionConfig) -> None:
         """Set attention implementation configuration.
 
-        Note: Now using direct sageattn calls like original SoulX-LiveAct.
-        USE_SAGEATTN global flag controls the implementation.
+        Args:
+            attention_config: Unified attention configuration from TeleFuser ops.
         """
-        logger.info(f"LiveAct DiT attention implementation: SageAttention={USE_SAGEATTN}")
+        for block in self.blocks:
+            block.self_attn._attn_config = attention_config
+            block.cross_attn._attn_config = attention_config
+            block.audio_cross_attn._attn_config = attention_config
+        logger.info(f"LiveAct DiT attention implementation: {attention_config.attn_impl}")
 
     def enable_usp(self, device_mesh: DeviceMesh | None = None) -> None:
         """Enable Ulysses sequence parallelism.

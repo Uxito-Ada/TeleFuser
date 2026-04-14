@@ -154,13 +154,30 @@ def attention(
                 use_sage_attention=sparse_state.config.use_sage_attention,
             )
 
-    # Dense attention: handle layout conversion for BNSD-based implementations
+    # Dense attention: handle layout conversion
+    # - Flash Attention expects BSND (NHD) layout
+    # - PyTorch SDPA variants expect BNSD (HND) layout
+    # - SageAttention can accept both via tensor_layout parameter
     BNSD_IMPLS = {AttnImplType.TORCH_CUDNN, AttnImplType.TORCH_SDPA, AttnImplType.SPARGE_ATTN}
+
+    # Track current layout after potential conversions
+    current_layout = input_layout
 
     if input_layout == "BSND" and attn_impl in BNSD_IMPLS:
         q = q.transpose(1, 2).contiguous()
         k = k.transpose(1, 2).contiguous()
         v = v.transpose(1, 2).contiguous()
+        current_layout = "BNSD"
+    elif (
+        input_layout == "BNSD"
+        and attn_impl not in BNSD_IMPLS
+        and attn_impl not in (AttnImplType.RADIAL_ATTN, AttnImplType.LOCAL_SPARSE_ATTN)
+    ):
+        # Flash Attention and SageAttention need BSND layout, so convert if input is BNSD
+        q = q.transpose(1, 2).contiguous()
+        k = k.transpose(1, 2).contiguous()
+        v = v.transpose(1, 2).contiguous()
+        current_layout = "BSND"
 
     output: Tensor | None = None
     lse: Tensor | None = None
@@ -193,6 +210,8 @@ def attention(
 
     # Sage Attention variants
     elif SAGE_ATTN_AVAILABLE and sageattention is not None:
+        # SageAttention tensor_layout: "NHD" for BSND, "HND" for BNSD
+        sage_tensor_layout = "NHD" if current_layout == "BSND" else "HND"
         if attn_impl == AttnImplType.SAGE_ATTN_2_8_8:
             result = sageattention.sageattn_qk_int8_pv_fp8_cuda(
                 q,
@@ -200,7 +219,7 @@ def attention(
                 v,
                 attn_mask=attn_mask,
                 sm_scale=scale,
-                tensor_layout="NHD",
+                tensor_layout=sage_tensor_layout,
                 pv_accum_dtype="fp32+fp32",
                 return_lse=return_lse,
             )
@@ -212,7 +231,7 @@ def attention(
                 v,
                 attn_mask=attn_mask,
                 sm_scale=scale,
-                tensor_layout="NHD",
+                tensor_layout=sage_tensor_layout,
                 pv_accum_dtype="fp32",
                 return_lse=return_lse,
             )
@@ -224,7 +243,7 @@ def attention(
                 v,
                 attn_mask=attn_mask,
                 sm_scale=scale,
-                tensor_layout="NHD",
+                tensor_layout=sage_tensor_layout,
                 pv_accum_dtype="fp32+fp32",
                 return_lse=return_lse,
             )
@@ -240,19 +259,17 @@ def attention(
         if msg not in _warned_attn_fallback:
             _warned_attn_fallback.add(msg)
             logger.warning(msg)
-        if input_layout == "BSND":
+        if current_layout == "BSND":
             q = q.transpose(1, 2).contiguous()
             k = k.transpose(1, 2).contiguous()
             v = v.transpose(1, 2).contiguous()
+            current_layout = "BNSD"
 
         output = F.scaled_dot_product_attention(q, k, v, attn_mask=attn_mask, scale=scale, is_causal=is_causal)
         attn_impl = AttnImplType.TORCH_SDPA
 
-    # Handle output layout conversion
-    need_transpose = (output_layout == "BSND" and attn_impl in BNSD_IMPLS) or (
-        output_layout == "BNSD" and attn_impl not in BNSD_IMPLS
-    )
-    if need_transpose:
+    # Handle output layout conversion - output matches current_layout, may need to convert to output_layout
+    if current_layout != output_layout:
         output = output.transpose(1, 2).contiguous()
 
     if return_lse:

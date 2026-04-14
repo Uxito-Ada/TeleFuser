@@ -5,17 +5,17 @@ talking head videos from an input image and audio with Ulysses Sequence Parallel
 
 Usage:
     # Single GPU
-    python examples/liveact/liveact_i2v_sp.py --gpu_num 1 \
+    python examples/liveact/liveact_s2v.py --gpu_num 1 \
         --ckpt_dir path/to/checkpoints --wav2vec_dir path/to/wav2vec2 \
         --image path/to/image.jpg --audio path/to/audio.wav
 
     # Multi-GPU SP (2 GPUs)
-    python examples/liveact/liveact_i2v_sp.py --gpu_num 2 \
+    python examples/liveact/liveact_s2v.py --gpu_num 2 \
         --ckpt_dir path/to/checkpoints --wav2vec_dir path/to/wav2vec2 \
         --image path/to/image.jpg --audio path/to/audio.wav
 
     # Multi-GPU SP (4 GPUs)
-    python examples/liveact/liveact_i2v_sp.py --gpu_num 4 \
+    python examples/liveact/liveact_s2v.py --gpu_num 4 \
         --ckpt_dir path/to/checkpoints --wav2vec_dir path/to/wav2vec2 \
         --image path/to/image.jpg --audio path/to/audio.wav
 """
@@ -41,7 +41,9 @@ PPL_CONFIG = dict(
     seed=42,
     height=480,
     width=832,
-    attention_config=AttentionConfig.dense_attention(AttnImplType.SAGE_ATTN_2_8_8_SM90),
+    # Attention configuration - modify this to change attention implementation
+    attn_impl=AttnImplType.SAGE_ATTN_2_8_8_SM90,
+    # Quantization and compile configuration
     quant_config=QuantConfig(enabled=True, quant_type=QuantType.FP8),
     compile_config=CompileConfig(
         enabled=True,
@@ -49,6 +51,7 @@ PPL_CONFIG = dict(
         backend="inductor",
         dynamic=False,
     ),
+    vae_compile=True,
 )
 
 
@@ -90,10 +93,10 @@ def get_pipeline(gpu_num: int, ckpt_dir: str, wav2vec_dir: str):
 
     pipeline = LiveActPipeline(device="cuda", torch_dtype=torch_dtype)
     config = LiveActPipelineConfig()
-    config.dit_config.attention_config = PPL_CONFIG["attention_config"]
+    config.dit_config.attention_config = AttentionConfig.dense_attention(PPL_CONFIG["attn_impl"])
     config.dit_config.quant_config = PPL_CONFIG["quant_config"]
     config.dit_config.compile_config = PPL_CONFIG["compile_config"]
-    config.vae_config.compile_config = CompileConfig(enabled=True)
+    config.vae_config.compile_config = CompileConfig(enabled=PPL_CONFIG["vae_compile"])
 
     # Configure SP parallelism for multi-GPU
     if gpu_num > 1:
