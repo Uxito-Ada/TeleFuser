@@ -27,9 +27,7 @@ from telefuser.core.config import AttentionConfig, AttnImplType
 from telefuser.distributed.parallel_shard import sequence_parallel_shard, sequence_parallel_unshard
 from telefuser.distributed.ulysses_comm import ulysses_gather_heads, ulysses_scatter_heads
 from telefuser.utils.logging import logger
-from telefuser.utils.profiler import ProfilingContext4Debug
 
-# Import SageAttention directly (same as original SoulX-LiveAct)
 try:
     from sageattention import sageattn
 
@@ -60,33 +58,64 @@ def rope_params(max_seq_len: int, dim: int, theta: float = 10000) -> torch.Tenso
     return freqs
 
 
-def causal_rope_apply(
-    x: torch.Tensor, grid_sizes: torch.Tensor, freqs: torch.Tensor, start_frame: int = 0
-) -> torch.Tensor:
-    """Apply causal 3D RoPE."""
-    s, n, c = x.size(1), x.size(2), x.size(3) // 2
+def build_freqs_combined(freqs: torch.Tensor, f: int, h: int, w: int, start_frame: int = 0) -> torch.Tensor:
+    """Build combined RoPE frequencies for 3D positions (temporal, height, width).
 
-    freqs = freqs.split([c - 2 * (c // 3), c // 3, c // 3], dim=1)
+    Args:
+        freqs: Base frequencies tensor [max_len, head_dim_half]
+        f: Number of frames
+        h: Height dimension
+        w: Width dimension
+        start_frame: Starting frame index (for incremental generation)
 
-    output = []
-    for i, (f, h, w) in enumerate(grid_sizes.tolist()):
-        seq_len = s
-        f = int(seq_len // (h * w))
-        x_i = torch.view_as_complex(x[i, :seq_len].to(torch.float64).reshape(seq_len, n, -1, 2))
-        freqs_i = torch.cat(
-            [
-                freqs[0][start_frame : start_frame + f].view(f, 1, 1, -1).expand(f, h, w, -1),
-                freqs[1][:h].view(1, h, 1, -1).expand(f, h, w, -1),
-                freqs[2][:w].view(1, 1, w, -1).expand(f, h, w, -1),
-            ],
-            dim=-1,
-        ).reshape(seq_len, 1, -1)
-        freqs_i = freqs_i.to(device=x_i.device)
-        x_i = torch.view_as_real(x_i * freqs_i).flatten(2)
-        x_i = torch.cat([x_i, x[i, seq_len:]])
+    Returns:
+        Combined frequencies tensor [f*h*w, 1, head_dim_half] in complex128
+    """
+    seq_len = f * h * w
+    head_dim_half = freqs.size(1)
 
-        output.append(x_i)
-    return torch.stack(output)
+    # Split freqs for temporal, height, width dimensions
+    c = head_dim_half
+    freqs_t, freqs_h, freqs_w = freqs.split([c - 2 * (c // 3), c // 3, c // 3], dim=1)
+
+    # Build combined freqs tensor
+    freqs_combined = torch.cat(
+        [
+            freqs_t[start_frame : start_frame + f].view(f, 1, 1, -1).expand(f, h, w, -1),
+            freqs_h[:h].view(1, h, 1, -1).expand(f, h, w, -1),
+            freqs_w[:w].view(1, 1, w, -1).expand(f, h, w, -1),
+        ],
+        dim=-1,
+    ).reshape(seq_len, 1, -1)
+
+    return freqs_combined
+
+
+def apply_rope(x: torch.Tensor, freqs_combined: torch.Tensor, seq_len: int) -> torch.Tensor:
+    """Apply RoPE with pre-computed frequencies.
+
+    Args:
+        x: Input tensor [batch, seq_len, num_heads, head_dim]
+        freqs_combined: Pre-computed frequencies [seq_len, 1, head_dim_half]
+        seq_len: Sequence length to apply RoPE to
+
+    Returns:
+        RoPE-applied tensor [batch, seq_len, num_heads, head_dim]
+    """
+    batch_size = x.size(0)
+    num_heads = x.size(2)
+
+    # Apply RoPE to entire batch at once
+    x_complex = torch.view_as_complex(x[:, :seq_len].to(torch.float64).reshape(batch_size, seq_len, num_heads, -1, 2))
+    x_rope = torch.view_as_real(x_complex * freqs_combined).flatten(2)
+    # Reshape back to NHD layout for SageAttention: [batch, seq_len, num_heads, head_dim]
+    x_rope = x_rope.view(batch_size, seq_len, num_heads, -1)
+
+    # Handle remaining tokens if any
+    if x.size(1) > seq_len:
+        x_rope = torch.cat([x_rope, x[:, seq_len:]], dim=1)
+
+    return x_rope
 
 
 class WanRMSNorm(nn.Module):
@@ -131,10 +160,7 @@ class SingleStreamAttention(nn.Module):
         dim: int,
         encoder_hidden_states_dim: int,
         num_heads: int,
-        qk_norm: bool = False,
         qkv_bias: bool = True,
-        eps: float = 1e-6,
-        norm_layer=WanRMSNorm,
     ):
         super().__init__()
         assert dim % num_heads == 0
@@ -296,11 +322,6 @@ class WanSelfAttention(nn.Module):
             :, 12 * tokens_per_frame : 14 * tokens_per_frame
         ]
 
-    def init_kvidx(self, frame_len: int, world_size: int):
-        self.kv_idx0 = torch.tensor(
-            list(range(6 * frame_len // world_size)), device=f"cuda:{int(os.getenv('RANK', 0))}"
-        )
-
     def _move_kv_cache_to_device(self, kv_cache: dict, device):
         kv_cache["k"] = kv_cache["k"].to(device=device, non_blocking=True)
         kv_cache["v"] = kv_cache["v"].to(device=device, non_blocking=True)
@@ -349,14 +370,26 @@ class WanSelfAttention(nn.Module):
     def forward(
         self,
         x: torch.Tensor,
-        seq_lens: torch.Tensor | None,
-        grid_sizes: torch.Tensor,
         freqs: torch.Tensor,
+        f: int,
+        h: int,
+        w: int,
         kv_cache: dict = {},
         start_idx: int | None = None,
         end_idx: int | None = None,
+        tokens_per_frame: int | None = None,
     ) -> tuple[torch.Tensor, None]:
-        """Self-attention - direct copy from original SoulX-LiveAct model_memory.py."""
+        """Self-attention with pre-computed RoPE frequencies.
+
+        Args:
+            x: Input tensor [batch, seq_len, dim]
+            freqs: Base frequencies tensor [max_len, head_dim_half]
+            f, h, w: Grid dimensions (frames, height, width)
+            kv_cache: KV cache dictionary
+            start_idx: Starting token index for incremental generation
+            end_idx: Ending token index for attention window
+            tokens_per_frame: Pre-computed h*w (optional, for compatibility)
+        """
         b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
 
         # query, key, value projection
@@ -369,7 +402,9 @@ class WanSelfAttention(nn.Module):
         q, k, v = qkv_fn(x)
         k_cache, v_cache = self._load_kv_cache(kv_cache, f"cuda:{int(os.getenv('RANK', 0))}", torch.bfloat16)
 
-        tokens_per_frame = math.prod(grid_sizes[0][1:]).item()
+        # Use pre-computed tokens_per_frame (h * w)
+        if tokens_per_frame is None:
+            tokens_per_frame = h * w
         current_start_frame = start_idx // tokens_per_frame
 
         # KV cache stores 6 frames, for attention form full KV
@@ -382,8 +417,14 @@ class WanSelfAttention(nn.Module):
             k_full = k_cache
             v_full = v_cache
 
-        roped_query = causal_rope_apply(q, grid_sizes, freqs, start_frame=current_start_frame).type_as(v)
-        roped_key = causal_rope_apply(k_full, grid_sizes, freqs, start_frame=0).type_as(v)
+        # Build RoPE frequencies for query (current frames) and key (all frames)
+        q_seq_len = q.size(1)
+        k_seq_len = k_full.size(1)
+        q_freqs = build_freqs_combined(freqs, q_seq_len // tokens_per_frame, h, w, start_frame=current_start_frame)
+        k_freqs = build_freqs_combined(freqs, k_seq_len // tokens_per_frame, h, w, start_frame=0)
+
+        roped_query = apply_rope(q, q_freqs, q_seq_len).type_as(v)
+        roped_key = apply_rope(k_full, k_freqs, k_seq_len).type_as(v)
 
         # Direct SageAttention call (same as original) - NHD layout, NO transpose needed!
         if USE_SAGEATTN:
@@ -448,8 +489,6 @@ class WanI2VCrossAttention(nn.Module):
         self,
         x: torch.Tensor,
         context: torch.Tensor,
-        context_lens: torch.Tensor | None,
-        cross_kv_cache: dict = {},
     ) -> torch.Tensor:
         """Cross-attention forward - same as original SoulX-LiveAct."""
         context_img = context[:, :257]
@@ -486,7 +525,6 @@ class WanAttentionBlock(nn.Module):
 
     def __init__(
         self,
-        cross_attn_type: str,
         dim: int,
         ffn_dim: int,
         num_heads: int,
@@ -526,10 +564,7 @@ class WanAttentionBlock(nn.Module):
             dim=dim,
             encoder_hidden_states_dim=output_dim,
             num_heads=num_heads,
-            qk_norm=False,
             qkv_bias=True,
-            eps=eps,
-            norm_layer=WanRMSNorm,
         )
         self.norm_x = WanLayerNorm(dim, eps, elementwise_affine=True) if norm_input_visual else nn.Identity()
 
@@ -537,55 +572,69 @@ class WanAttentionBlock(nn.Module):
         self,
         x: torch.Tensor,
         e: torch.Tensor,
-        seq_lens: torch.Tensor | None,
-        grid_sizes: torch.Tensor,
         freqs: torch.Tensor,
+        f: int,
+        h: int,
+        w: int,
         context: torch.Tensor,
-        context_lens: torch.Tensor | None,
         kv_cache: dict = {},
         start_idx: int | None = None,
         end_idx: int | None = None,
-        cross_kv_cache: dict = {},
         audio_embedding: torch.Tensor | None = None,
-        ref_target_masks: torch.Tensor | None = None,
-        human_num: int | None = None,
         skip_audio: bool = False,
-        block_idx: int = 0,
+        tokens_per_frame: int | None = None,
     ) -> torch.Tensor:
-        """Transformer block forward - same as original SoulX-LiveAct."""
+        """Transformer block forward - same as original SoulX-LiveAct.
+
+        Args:
+            x: Input tensor [batch, seq_len, dim]
+            e: Time embedding modulation
+            freqs: Base frequencies tensor [max_len, head_dim_half]
+            f, h, w: Grid dimensions (frames, height, width)
+            context: Text conditioning
+            kv_cache: KV cache dictionary
+            start_idx: Starting token index for incremental generation
+            end_idx: Ending token index for attention window
+            audio_embedding: Audio conditioning tensor
+            skip_audio: Whether to skip audio cross-attention
+            tokens_per_frame: Pre-computed h*w (optional, defaults to h*w)
+        """
         dtype = x.dtype
 
-        # Modulation
         if len(e.shape) == 3:
-            e = (self.modulation.to(e.device) + e).chunk(6, dim=1)
+            e = (self.modulation + e).chunk(6, dim=1)
         else:
-            e = (self.modulation.unsqueeze(-2).to(e.device) + e)[0].chunk(6, dim=0)
+            e = (self.modulation.unsqueeze(-2) + e)[0].chunk(6, dim=0)
 
         # self-attention (same as original, no ProfilingContext wrapper)
         y, _ = self.self_attn(
             (self.norm1(x).float() * (1 + e[1]) + e[0]).type_as(x),
-            seq_lens,
-            grid_sizes,
             freqs,
+            f,
+            h,
+            w,
             kv_cache=kv_cache,
             start_idx=start_idx,
             end_idx=end_idx,
+            tokens_per_frame=tokens_per_frame,
         )
         x = x + y * e[2]
 
         x = x.to(dtype)
 
         # cross-attention of text
-        x = x + self.cross_attn(self.norm3(x), context, context_lens, cross_kv_cache=cross_kv_cache)
+        x = x + self.cross_attn(self.norm3(x), context)
 
         # cross attn of audio
         if not skip_audio:
-            tokens_per_frame = math.prod(grid_sizes[0][1:]).item()
-            start_f = start_idx // tokens_per_frame
+            # Use pre-computed tokens_per_frame (h * w)
+            if tokens_per_frame is None:
+                tokens_per_frame = h * w
+            start_f = start_idx // tokens_per_frame if tokens_per_frame else 0
             x_a = self.audio_cross_attn(
                 self.norm_x(x),
                 encoder_hidden_states=audio_embedding,
-                shape=grid_sizes[0],
+                shape=(f, h, w),
                 start_f=start_f,
             )
             # Only zero first frame (matches original SoulX-LiveAct)
@@ -621,7 +670,7 @@ class Head(nn.Module):
         self.modulation = nn.Parameter(torch.randn(1, 2, dim) / dim**0.5)
 
     def forward(self, x: torch.Tensor, e: torch.Tensor) -> torch.Tensor:
-        e = (self.modulation.to(e.device) + e.unsqueeze(1)).chunk(2, dim=1)
+        e = (self.modulation + e.unsqueeze(1)).chunk(2, dim=1)
         x = self.head(self.norm(x) * (1 + e[1]) + e[0])
         return x
 
@@ -785,11 +834,9 @@ class LiveActDiT(BaseModel):
         self.time_projection = nn.Sequential(nn.SiLU(), nn.Linear(dim, dim * 6))
 
         # blocks
-        cross_attn_type = "i2v_cross_attn"
         self.blocks = nn.ModuleList(
             [
                 WanAttentionBlock(
-                    cross_attn_type,
                     dim,
                     ffn_dim,
                     num_heads,
@@ -807,9 +854,11 @@ class LiveActDiT(BaseModel):
         # head
         self.head = Head(dim, out_dim, patch_size, eps)
 
+        # RoPE frequencies - keep as regular attribute to preserve complex128 dtype
+        # (buffers get converted when model.to(dtype=...) is called)
         assert (dim % num_heads) == 0 and (dim // num_heads) % 2 == 0
         d = dim // num_heads
-        self.freqs = torch.cat(
+        self._freqs = torch.cat(
             [
                 rope_params(1024, d - 4 * (d // 6)),
                 rope_params(1024, 2 * (d // 6)),
@@ -841,40 +890,30 @@ class LiveActDiT(BaseModel):
         if weight_init:
             self.init_weights()
 
-    def init_freqs(self):
-        d = self.dim // self.num_heads
-        self.freqs = torch.cat(
-            [
-                rope_params(1024, d - 4 * (d // 6)),
-                rope_params(1024, 2 * (d // 6)),
-                rope_params(1024, 2 * (d // 6)),
-            ],
-            dim=1,
-        )
+    @property
+    def freqs(self) -> torch.Tensor:
+        """Return RoPE frequencies (complex128)."""
+        return self._freqs
 
     def forward(
         self,
         x: list,
         t: torch.Tensor,
         context: list,
-        seq_len: torch.Tensor | None = None,
         clip_fea: torch.Tensor | None = None,
         y: list | None = None,
         audio: torch.Tensor | None = None,
-        ref_target_masks: torch.Tensor | None = None,
         e0: torch.Tensor | None = None,
         kv_cache: dict = {},
         start_idx: int | None = None,
         end_idx: int | None = None,
-        cross_kv_cache: dict = {},
         skip_audio: bool = False,
     ) -> torch.Tensor:
         """DiT forward - same as original SoulX-LiveAct model_memory.py."""
         assert clip_fea is not None and y is not None
 
-        _, T, H, W = x[0].shape
-        N_h = H // self.patch_size[1]
-        N_w = W // self.patch_size[2]
+        # Move freqs to GPU if needed
+        self._freqs = self._freqs.to(x[0].device)
 
         if y is not None:
             x = [torch.cat([u, v], dim=0) for u, v in zip(x, y)]
@@ -882,9 +921,9 @@ class LiveActDiT(BaseModel):
 
         # embeddings
         x = [self.patch_embedding(u.unsqueeze(0)) for u in x]
-        grid_sizes = torch.stack([torch.tensor(u.shape[2:], dtype=torch.long) for u in x])
+        # Extract grid dimensions (f, h, w) directly - assuming batch=1
+        f, h, w = x[0].shape[2:]
         x = [u.flatten(2).transpose(1, 2) for u in x]
-        seq_lens = torch.tensor([u.size(1) for u in x], dtype=torch.long)
         x = torch.cat(x)
 
         # time embeddings
@@ -895,7 +934,6 @@ class LiveActDiT(BaseModel):
             e = self.time_embedding(sinusoidal_embedding_1d(self.freq_dim, t).float())
 
         # text embedding
-        context_lens = None
         context = self.text_embedding(
             torch.stack([torch.cat([u, u.new_zeros(self.text_len - u.size(0), u.size(1))]) for u in context])
         )
@@ -921,83 +959,68 @@ class LiveActDiT(BaseModel):
             [latter_first_frame_audio_emb, latter_middle_frame_audio_emb, latter_last_frame_audio_emb], dim=2
         )
         audio_embedding = self.audio_proj(first_frame_audio_emb_s, latter_frame_audio_emb_s)
-        human_num = len(audio_embedding)
         audio_embedding = torch.concat(audio_embedding.split(1), dim=2).to(x.dtype)
 
-        # convert ref_target_masks to token_ref_target_masks
-        if ref_target_masks is not None:
-            ref_target_masks = ref_target_masks.unsqueeze(0)
-            token_ref_target_masks = F.interpolate(ref_target_masks, size=(N_h, N_w), mode="nearest")
-            token_ref_target_masks = token_ref_target_masks.squeeze(0)
-            token_ref_target_masks = token_ref_target_masks > 0
-            token_ref_target_masks = token_ref_target_masks.view(token_ref_target_masks.shape[0], -1)
-            token_ref_target_masks = token_ref_target_masks.to(x.dtype)
-
-        # arguments
-        kwargs = dict(
-            e=e0,
-            seq_lens=seq_lens,
-            grid_sizes=grid_sizes,
-            freqs=self.freqs,
-            context=context,
-            context_lens=context_lens,
-            audio_embedding=audio_embedding,
-            ref_target_masks=token_ref_target_masks,
-            human_num=human_num,
-            start_idx=start_idx,
-            end_idx=end_idx,
-            skip_audio=skip_audio,
-        )
-
-        # Transformer blocks - exact same structure as original WanModel
-        # (torch.compile optimization depends on this exact structure)
-        if torch.is_grad_enabled() and self.gradient_checkpointing:
-            from torch.utils.checkpoint import checkpoint
-
-            for block_index, block in enumerate(self.blocks):
-                if kv_cache.get(block_index) is None:
-                    kv_cache[block_index] = {}
-                if cross_kv_cache.get(block_index) is None:
-                    cross_kv_cache[block_index] = {}
-                x = checkpoint(
-                    block,
-                    x,
-                    kv_cache=kv_cache[block_index],
-                    cross_kv_cache=cross_kv_cache[block_index],
-                    use_reentrant=False,
-                    **kwargs,
-                )
-        else:
-            for block_index, block in enumerate(self.blocks):
-                if kv_cache.get(block_index) is None:
-                    kv_cache[block_index] = {}
-                if cross_kv_cache.get(block_index) is None:
-                    cross_kv_cache[block_index] = {}
-                x = block(
-                    x,
-                    kv_cache=kv_cache[block_index],
-                    cross_kv_cache=cross_kv_cache[block_index],
-                    **kwargs,
-                )
+        # Pre-compute tokens_per_frame (h * w)
+        tokens_per_frame = h * w
+        for block_index, block in enumerate(self.blocks):
+            if kv_cache.get(block_index) is None:
+                kv_cache[block_index] = {}
+            x = block(
+                x,
+                kv_cache=kv_cache[block_index],
+                e=e0,
+                freqs=self.freqs,
+                f=f,
+                h=h,
+                w=w,
+                context=context,
+                audio_embedding=audio_embedding,
+                start_idx=start_idx,
+                end_idx=end_idx,
+                skip_audio=skip_audio,
+                tokens_per_frame=tokens_per_frame,
+            )
 
         # head
         x = self.head(x, e)
 
         # unpatchify
-        x = self.unpatchify(x, grid_sizes)
+        x = self.unpatchify(x, f, h, w)
 
         return torch.stack(x)
 
-    def unpatchify(self, x: torch.Tensor, grid_sizes: torch.Tensor) -> list:
-        """Reconstruct video tensors from patch embeddings."""
+    def unpatchify(self, x: torch.Tensor, f: int, h: int, w: int) -> list:
+        """Reconstruct video tensors from patch embeddings.
+
+        Args:
+            x: Input tensor [batch, seq_len, dim]
+            f: Number of frames
+            h: Height dimension
+            w: Width dimension
+
+        Returns:
+            List of reconstructed video tensors [c, f*p0, h*p1, w*p2]
+        """
         c = self.out_dim
-        out = []
-        for u, v in zip(x, grid_sizes.tolist()):
-            u = u[: math.prod(v)].view(*v, *self.patch_size, c)
-            u = torch.einsum("fhwpqrc->cfphqwr", u)
-            u = u.reshape(c, *[i * j for i, j in zip(v, self.patch_size)])
-            out.append(u)
-        return out
+        batch_size = x.size(0)
+        tokens_per_video = f * h * w
+
+        # Process all batch items at once using tensor operations
+        x_trimmed = x[:, :tokens_per_video]
+        x_reshaped = x_trimmed.view(batch_size, f, h, w, *self.patch_size, c)
+        # Batch einsum: bfhwpqrc -> cbfphqwr
+        x_permuted = torch.einsum("bfhwpqrc->cbfphqwr", x_reshaped)
+        # Reshape to final output shape
+        x_out = x_permuted.reshape(
+            batch_size,
+            c,
+            f * self.patch_size[0],
+            h * self.patch_size[1],
+            w * self.patch_size[2],
+        )
+        # Return as list of tensors (each batch item)
+        return list(x_out.unbind(0))
 
     def init_weights(self):
         """Initialize model parameters using Xavier initialization."""

@@ -43,7 +43,12 @@ PPL_CONFIG = dict(
     width=832,
     attention_config=AttentionConfig.dense_attention(AttnImplType.SAGE_ATTN_2_8_8_SM90),
     quant_config=QuantConfig(enabled=True, quant_type=QuantType.FP8),
-    compile_config=CompileConfig(enabled=True, dynamic=False),
+    compile_config=CompileConfig(
+        enabled=True,
+        mode="max-autotune-no-cudagraphs",
+        backend="inductor",
+        dynamic=False,
+    ),
 )
 
 
@@ -88,7 +93,7 @@ def get_pipeline(gpu_num: int, ckpt_dir: str, wav2vec_dir: str):
     config.dit_config.attention_config = PPL_CONFIG["attention_config"]
     config.dit_config.quant_config = PPL_CONFIG["quant_config"]
     config.dit_config.compile_config = PPL_CONFIG["compile_config"]
-    config.vae_config.compile_config = PPL_CONFIG["compile_config"]
+    config.vae_config.compile_config = CompileConfig(enabled=True)
 
     # Configure SP parallelism for multi-GPU
     if gpu_num > 1:

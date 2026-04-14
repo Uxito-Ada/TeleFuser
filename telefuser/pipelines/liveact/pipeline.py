@@ -251,10 +251,6 @@ class LiveActPipeline(BasePipeline):
 
         y = self.prepare_vae_latent(input_image_tensor, frame_num_per_iter)
 
-        ref_target_masks = torch.ones(3, height // VAE_STRIDE[1], width // VAE_STRIDE[2]).to(
-            self.device, self.torch_dtype
-        )
-
         # Calculate tokens per frame for DiT
         tokens_per_frame = (height // (PATCH_SIZE[1] * VAE_STRIDE[1])) * (width // (PATCH_SIZE[2] * VAE_STRIDE[2]))
 
@@ -299,7 +295,6 @@ class LiveActPipeline(BasePipeline):
                 clip_fea=clip_fea,
                 audio_embedding=audio_emb_for_dit,
                 y=y,
-                ref_target_masks=ref_target_masks,
                 tokens_per_frame=tokens_per_frame,
                 audio_cfg=audio_cfg,
                 num_inference_steps=num_inference_steps,

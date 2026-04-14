@@ -24,13 +24,8 @@ Usage:
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
-
 import torch
 import torch.distributed as dist
-
-if TYPE_CHECKING:
-    pass  # CompileConfig imported at runtime to avoid circular import
 
 
 def set_global_compile_configs(

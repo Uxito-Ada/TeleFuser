@@ -82,14 +82,8 @@ class LiveActDenoisingStage(BaseStage):
         parallel_cfg = model_runtime_config.parallel_config
 
         if parallel_cfg.world_size == 1:
-            # Single GPU: enable optimizations in __init__
-            # Note: For original SoulX-LiveAct WanModel, FP8 and compile are already done in example
-            # Only apply if dit doesn't have _is_external_model flag (TeleFuser's model)
-            # Order matches original generate.py: FP8 -> eval -> compile -> freqs.to(device) ->
-            #  model.to(device) -> freeze
-
             # 1. Enable FP8 GEMM (same as original generate.py)
-            if quant_config.enabled and not hasattr(self.dit, "_is_external_model"):
+            if quant_config.enabled:
                 try:
                     from telefuser.ops.fp8_gemm import FP8GemmOptions, enable_fp8_gemm
 
@@ -100,28 +94,8 @@ class LiveActDenoisingStage(BaseStage):
 
             # 2. torch.compile (exact same approach as original generate.py)
             # Original: torch.compile(model, mode="max-autotune-no-cudagraphs", backend="inductor", dynamic=False)
-            if compile_config.enabled and not hasattr(self.dit, "_is_external_model"):
-                self.dit.eval()
-                self.dit = torch.compile(
-                    self.dit,
-                    mode="max-autotune-no-cudagraphs",
-                    backend="inductor",
-                    dynamic=False,
-                )
-                logger.info("✓ torch.compile enabled for DiT (max-autotune-no-cudagraphs, backend=inductor)")
-
-            # 3. Move freqs tensor to device (required for RoPE)
-            if hasattr(self.dit, "freqs"):
-                self.dit.freqs = self.dit.freqs.to(self.device)
-
-            # 4. Move model to device (same as original)
-            self.dit = self.dit.to(self.device)
-            self.onload_models_flag = True  # Mark as already loaded to skip decorator overhead
-
-            # 5. Freeze parameters (same as original)
-            for param in self.dit.parameters():
-                param.requires_grad = False
-
+            if compile_config.enabled:
+                self.dit = torch.compile(self.dit, **(compile_config.get_compile_kwargs()))
         # Get model architecture params from dit
         self.num_layers = len(self.dit.blocks)
         self.num_heads = self.dit.num_heads
@@ -286,7 +260,6 @@ class LiveActDenoisingStage(BaseStage):
         clip_fea: torch.Tensor,
         audio_embedding: torch.Tensor,
         y: torch.Tensor,
-        ref_target_masks: torch.Tensor | None,
         tokens_per_frame: int,
         audio_cfg: float = 1.0,
         num_inference_steps: int = 3,
@@ -338,17 +311,6 @@ class LiveActDenoisingStage(BaseStage):
             start_idx = sum(blksz_lst[:f]) * tokens_per_frame
             end_idx = sum(blksz_lst[: f + 1]) * tokens_per_frame
 
-            # Pack args into dict (same as original)
-            arg_c = {
-                "context": context,
-                "clip_fea": clip_fea,
-                "audio": audio_embedding,
-                "y": y_slice,
-                "ref_target_masks": ref_target_masks,
-                "start_idx": start_idx,
-                "end_idx": end_idx,
-            }
-
             # Profile dit forward
             with ProfilingContext4Debug(f"dit_forward_t{i}"):
                 # Direct dit call matching original generate.py
@@ -357,25 +319,26 @@ class LiveActDenoisingStage(BaseStage):
                     t=timestep,
                     kv_cache=self.kv_cache[i],
                     skip_audio=False,
-                    **arg_c,
+                    context=context,
+                    clip_fea=clip_fea,
+                    audio=audio_embedding,
+                    y=y_slice,
+                    start_idx=start_idx,
+                    end_idx=end_idx,
                 )[0]
 
             # Audio CFG (same as original)
             if audio_cfg > 1.0 and i in [1, 2] and kv_cache_null_audio is not None:
-                arg_null_audio = {
-                    "context": context,
-                    "clip_fea": clip_fea,
-                    "audio": torch.zeros_like(audio_embedding),
-                    "y": y_slice,
-                    "ref_target_masks": ref_target_masks,
-                    "start_idx": start_idx,
-                    "end_idx": end_idx,
-                }
                 noise_pred_drop_audio = self.dit(
                     [latent],
                     t=timestep,
                     kv_cache=kv_cache_null_audio[i],
-                    **arg_null_audio,
+                    context=context,
+                    clip_fea=clip_fea,
+                    audio=torch.zeros_like(audio_embedding),
+                    y=y_slice,
+                    start_idx=start_idx,
+                    end_idx=end_idx,
                 )[0]
                 noise_pred = noise_pred_drop_audio + audio_cfg * (noise_pred - noise_pred_drop_audio)
 
