@@ -25,6 +25,7 @@ from torch.distributed.device_mesh import DeviceMesh
 from telefuser.cache import KVCache
 from telefuser.core.base_model import BaseModel
 from telefuser.core.config import AttentionConfig, AttnImplType
+from telefuser.distributed import get_ulysses_group, get_ulysses_rank, get_ulysses_world_size
 from telefuser.distributed.parallel_shard import sequence_parallel_shard, sequence_parallel_unshard
 from telefuser.distributed.ulysses_comm import ulysses_gather_heads, ulysses_scatter_heads
 from telefuser.ops.attention import attention
@@ -181,24 +182,39 @@ class SingleStreamAttention(nn.Module):
         shape: tuple | None = None,
         start_f: int = 0,
     ) -> torch.Tensor:
-        """Audio cross-attention forward - same as original SoulX-LiveAct."""
-        encoder_hidden_states = encoder_hidden_states.squeeze(0)
-        N_t, N_h, N_w = shape
+        """Audio cross-attention forward.
 
+        In SP mode: each rank processes its corresponding frame chunk of encoder_kv.
+        encoder_kv is sliced by sp_rank: [start_f + sp_rank*B : start_f + (sp_rank+1)*B]
+        """
+        encoder_hidden_states = encoder_hidden_states.squeeze(0)
+        _, N_h, N_w = shape
+
+        # In SP mode, each rank only holds partial frames
+        N_t = x.size(1) // (N_h * N_w)
         x = rearrange(x, "B (N_t S) C -> (B N_t) S C", N_t=N_t)
 
         B, N, C = x.shape
+        frames_per_rank = B
+
         q = self.q_linear(x)
-        q_shape = (B, N, self.num_heads, self.head_dim)
-        q = q.view(q_shape).permute((0, 2, 1, 3))  # [B, H, N, D] - BNSD layout
+        q = q.view(B, N, self.num_heads, self.head_dim).permute((0, 2, 1, 3))
 
         B_e, N_a, _ = encoder_hidden_states.shape
         encoder_kv = self.kv_linear(encoder_hidden_states)
-        encoder_kv_shape = (B_e, N_a, 2, self.num_heads, self.head_dim)
-        encoder_kv = encoder_kv.view(encoder_kv_shape)[start_f : start_f + B].permute((2, 0, 3, 1, 4))
-        encoder_k, encoder_v = encoder_kv.unbind(0)  # [B, H, M, D]
+        encoder_kv = encoder_kv.view(B_e, N_a, 2, self.num_heads, self.head_dim)
 
-        # Audio cross-attention using unified ops (HND layout = BNSD)
+        # SP mode: slice encoder_kv by sp_rank
+        if self.sp_flag:
+            kv_start = start_f + self.sp_rank * frames_per_rank
+            kv_end = start_f + (self.sp_rank + 1) * frames_per_rank
+            encoder_kv = encoder_kv[kv_start:kv_end]
+        else:
+            encoder_kv = encoder_kv[start_f : start_f + frames_per_rank]
+
+        encoder_kv = encoder_kv.permute((2, 0, 3, 1, 4))
+        encoder_k, encoder_v = encoder_kv.unbind(0)
+
         x = attention(
             q,
             encoder_k,
@@ -209,10 +225,7 @@ class SingleStreamAttention(nn.Module):
             is_causal=False,
         )
 
-        # Linear transform
-        x_output_shape = (B, N, C)
-        x = x.transpose(1, 2)  # [B, N, H, D] - convert BNSD to BSND for reshape
-        x = x.reshape(x_output_shape)
+        x = x.transpose(1, 2).reshape(B, N, C)
         x = self.proj(x)
 
         x = rearrange(x, "(B N_t) S C -> B (N_t S) C", N_t=N_t)
@@ -336,6 +349,83 @@ class WanSelfAttention(nn.Module):
             :, 12 * tokens_per_frame : 14 * tokens_per_frame
         ]
 
+    def forward_sp(
+        self,
+        x: torch.Tensor,
+        freqs: torch.Tensor,
+        f: int,
+        h: int,
+        w: int,
+        kv_cache: KVCache,
+        start_idx: int | None = None,
+        end_idx: int | None = None,
+        tokens_per_frame: int | None = None,
+    ) -> tuple[torch.Tensor, None]:
+        """Self-attention with KVCache in Ulysses SP mode.
+
+        In Ulysses SP, we scatter heads across ranks:
+        - QKV: [B, S/N, H, D] -> [B, S, H/N, D] after scatter
+        - Each rank holds H/N heads for full sequence
+        - KV cache stores [1, seq, H/N, D] (full sequence, local heads)
+        """
+        b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
+
+        # QKV projection [B, S/N, H, D]
+        q = self.norm_q(self.q(x)).view(b, s, n, d)
+        k = self.norm_k(self.k(x)).view(b, s, n, d)
+        v = self.v(x).view(b, s, n, d)
+
+        # Ulysses scatter heads: [B, S/N, H, D] -> [B, S, H/N, D]
+        q = ulysses_scatter_heads(q, self.ulysses_group)()
+        k = ulysses_scatter_heads(k, self.ulysses_group)()
+        v = ulysses_scatter_heads(v, self.ulysses_group)()
+
+        k_cache, v_cache = kv_cache.load(x.device, torch.bfloat16)
+
+        if tokens_per_frame is None:
+            tokens_per_frame = h * w
+        current_start_frame = start_idx // tokens_per_frame
+
+        # KV cache stores 6 frames, for attention from full KV
+        if start_idx != 0:
+            k_full = torch.cat([k_cache, k], dim=1)
+            v_full = torch.cat([v_cache, v], dim=1)
+        else:
+            k_cache[:, : 6 * tokens_per_frame] = k
+            v_cache[:, : 6 * tokens_per_frame] = v
+            k_full = k_cache
+            v_full = v_cache
+
+        q_seq_len = q.size(1)
+        k_seq_len = k_full.size(1)
+        q_freqs = build_freqs_combined(freqs, q_seq_len // tokens_per_frame, h, w, start_frame=current_start_frame)
+        k_freqs = build_freqs_combined(freqs, k_seq_len // tokens_per_frame, h, w, start_frame=0)
+
+        roped_query = apply_rope(q, q_freqs, q_seq_len).type_as(v)
+        roped_key = apply_rope(k_full, k_freqs, k_seq_len).type_as(v)
+
+        x = attention(
+            roped_query,
+            roped_key[:, :end_idx, ...],
+            v_full[:, :end_idx, ...],
+            attention_config=self._attn_config,
+            input_layout="BSND",
+            output_layout="BSND",
+            is_causal=False,
+        ).type_as(x)
+
+        if start_idx != 0:
+            self._compress_kv_cache_simple(k_full, v_full, k_cache, v_cache, tokens_per_frame)
+
+        kv_cache.store(k_cache, v_cache)
+
+        # Ulysses gather heads: [B, S, H/N, D] -> [B, S/N, H, D]
+        x = ulysses_gather_heads(x, self.ulysses_group, num_heads=self.num_heads)()
+
+        x = x.flatten(2)
+        x = self.o(x)
+        return x, None
+
     def forward(
         self,
         x: torch.Tensor,
@@ -359,25 +449,22 @@ class WanSelfAttention(nn.Module):
             end_idx: Ending token index for attention window
             tokens_per_frame: Pre-computed h*w (optional, for compatibility)
         """
+        if self.sp_flag:
+            return self.forward_sp(x, freqs, f, h, w, kv_cache, start_idx, end_idx, tokens_per_frame)
+
         b, s, n, d = *x.shape[:2], self.num_heads, self.head_dim
 
-        # query, key, value projection
-        def qkv_fn(x):
-            q = self.norm_q(self.q(x)).view(b, s, n, d)
-            k = self.norm_k(self.k(x)).view(b, s, n, d)
-            v = self.v(x).view(b, s, n, d)
-            return q, k, v
-
-        q, k, v = qkv_fn(x)
+        # QKV projection
+        q = self.norm_q(self.q(x)).view(b, s, n, d)
+        k = self.norm_k(self.k(x)).view(b, s, n, d)
+        v = self.v(x).view(b, s, n, d)
 
         k_cache, v_cache = kv_cache.load(x.device, torch.bfloat16)
 
-        # Use pre-computed tokens_per_frame (h * w)
         if tokens_per_frame is None:
             tokens_per_frame = h * w
         current_start_frame = start_idx // tokens_per_frame
 
-        # KV cache stores 6 frames, for attention form full KV
         if start_idx != 0:
             k_full = torch.cat([k_cache, k], dim=1)
             v_full = torch.cat([v_cache, v], dim=1)
@@ -387,7 +474,6 @@ class WanSelfAttention(nn.Module):
             k_full = k_cache
             v_full = v_cache
 
-        # Build RoPE frequencies for query (current frames) and key (all frames)
         q_seq_len = q.size(1)
         k_seq_len = k_full.size(1)
         q_freqs = build_freqs_combined(freqs, q_seq_len // tokens_per_frame, h, w, start_frame=current_start_frame)
@@ -396,7 +482,6 @@ class WanSelfAttention(nn.Module):
         roped_query = apply_rope(q, q_freqs, q_seq_len).type_as(v)
         roped_key = apply_rope(k_full, k_freqs, k_seq_len).type_as(v)
 
-        # Self-attention with KVCache - BSND layout (NHD in SageAttention terminology)
         x = attention(
             roped_query,
             roped_key[:, :end_idx, ...],
@@ -407,13 +492,11 @@ class WanSelfAttention(nn.Module):
             is_causal=False,
         ).type_as(x)
 
-        # Update cache after attention
         if start_idx != 0:
             self._compress_kv_cache_simple(k_full, v_full, k_cache, v_cache, tokens_per_frame)
 
         kv_cache.store(k_cache, v_cache)
 
-        # output projection
         x = x.flatten(2)
         x = self.o(x)
         return x, None
@@ -606,7 +689,6 @@ class WanAttentionBlock(nn.Module):
 
         # cross attn of audio
         if not skip_audio:
-            # Use pre-computed tokens_per_frame (h * w)
             if tokens_per_frame is None:
                 tokens_per_frame = h * w
             start_f = start_idx // tokens_per_frame if tokens_per_frame else 0
@@ -616,8 +698,8 @@ class WanAttentionBlock(nn.Module):
                 shape=(f, h, w),
                 start_f=start_f,
             )
-            # Only zero first frame (matches original SoulX-LiveAct)
-            if start_f == 0:
+            # Only zero first frame on sp_rank=0 to match original model behavior
+            if start_f == 0 and (not self.audio_cross_attn.sp_flag or self.audio_cross_attn.sp_rank == 0):
                 x_a[:, :tokens_per_frame] = 0
             x = x + x_a
 
@@ -944,6 +1026,11 @@ class LiveActDiT(BaseModel):
         audio_embedding = self.audio_proj(first_frame_audio_emb_s, latter_frame_audio_emb_s)
         audio_embedding = torch.concat(audio_embedding.split(1), dim=2).to(x.dtype)
 
+        # Sequence parallel: shard x across ranks [B, S, D] -> [B, S/N, D]
+        seq_len = x.size(1)
+        if self.usp_flag:
+            sequence_parallel_shard(self.device_mesh, [x], seq_dims=[1])
+
         # Pre-compute tokens_per_frame (h * w)
         tokens_per_frame = h * w
         for block_index, block in enumerate(self.blocks):
@@ -965,6 +1052,10 @@ class LiveActDiT(BaseModel):
 
         # head
         x = self.head(x, e)
+
+        # Sequence parallel: unshard x back to full sequence [B, S/N, D] -> [B, S, D]
+        if self.usp_flag:
+            (x,) = sequence_parallel_unshard(self.device_mesh, (x,), seq_dims=(1,), seq_lens=(seq_len,))
 
         # unpatchify
         x = self.unpatchify(x, f, h, w)
@@ -1042,11 +1133,42 @@ class LiveActDiT(BaseModel):
         Args:
             device_mesh: Device mesh for distributed communication.
         """
-        logger.info(
-            "LiveAct DiT enable USP (Ulysses Sequence Parallel) - currently not supported with original implementation"
-        )
+        logger.info("LiveAct DiT enable USP (Ulysses Sequence Parallel)")
         self.device_mesh = device_mesh
-        self.usp_flag = False  # SP not supported with original-style implementation
+
+        if device_mesh is None:
+            return
+
+        sp_size = get_ulysses_world_size(device_mesh)
+        if self.num_heads % sp_size != 0:
+            raise ValueError(f"num_heads {self.num_heads} must be divisible by sp_size {sp_size}")
+
+        self.usp_flag = True
+        ulysses_group = get_ulysses_group(device_mesh)
+        sp_rank = get_ulysses_rank(device_mesh)
+
+        for block in self.blocks:
+            block.self_attn.sp_flag = True
+            block.self_attn.device_mesh = device_mesh
+            block.self_attn.ulysses_group = ulysses_group
+
+            block.audio_cross_attn.sp_flag = True
+            block.audio_cross_attn.sp_rank = sp_rank
+            block.audio_cross_attn.sp_size = sp_size
+
+            # Replace memory_proj with sliced versions for SP mode
+            local_dim = block.self_attn.dim // sp_size
+            new_proj_k = nn.Conv1d(local_dim, local_dim, kernel_size=5, stride=5, groups=local_dim, bias=False)
+            new_proj_v = nn.Conv1d(local_dim, local_dim, kernel_size=5, stride=5, groups=local_dim, bias=False)
+
+            start = sp_rank * local_dim
+            end = (sp_rank + 1) * local_dim
+            with torch.no_grad():
+                new_proj_k.weight.copy_(block.self_attn.memory_proj_k.weight[start:end, :, :])
+                new_proj_v.weight.copy_(block.self_attn.memory_proj_v.weight[start:end, :, :])
+
+            block.self_attn.memory_proj_k = new_proj_k
+            block.self_attn.memory_proj_v = new_proj_v
 
     def get_fsdp_module_names(self) -> list[str]:
         """Get module names for FSDP sharding."""
