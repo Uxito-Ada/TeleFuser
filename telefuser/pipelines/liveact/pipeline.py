@@ -148,8 +148,8 @@ class LiveActPipeline(BasePipeline):
             kv_cache_config=KVCacheConfig(
                 fp8_kv_cache=config.fp8_kv_cache,
                 offload_cache=config.offload_cache,
-                mean_memory=config.mean_memory,
             ),
+            mean_memory=config.mean_memory,
         )
 
         # Wrap with ParallelWorker for distributed inference

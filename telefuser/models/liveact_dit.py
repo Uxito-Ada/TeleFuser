@@ -22,6 +22,7 @@ import torch.nn.functional as F
 from einops import rearrange
 from torch.distributed.device_mesh import DeviceMesh
 
+from telefuser.cache import KVCache
 from telefuser.core.base_model import BaseModel
 from telefuser.core.config import AttentionConfig, AttnImplType
 from telefuser.distributed.parallel_shard import sequence_parallel_shard, sequence_parallel_unshard
@@ -228,6 +229,7 @@ class WanSelfAttention(nn.Module):
         window_size: tuple = (-1, -1),
         qk_norm: bool = True,
         eps: float = 1e-6,
+        mean_memory: bool = False,
     ):
         assert dim % num_heads == 0
         super().__init__()
@@ -237,6 +239,7 @@ class WanSelfAttention(nn.Module):
         self.window_size = window_size
         self.qk_norm = qk_norm
         self.eps = eps
+        self.mean_memory = mean_memory
 
         self.q = nn.Linear(dim, dim)
         self.k = nn.Linear(dim, dim)
@@ -288,17 +291,24 @@ class WanSelfAttention(nn.Module):
         kv = kv.view(B, T, n_frame, H, C).mean(dim=2)
         return kv
 
-    def _compress_kv_cache(
+    def _compress_kv_cache_simple(
         self,
         k_full: torch.Tensor,
         v_full: torch.Tensor,
         k_cache: torch.Tensor,
         v_cache: torch.Tensor,
         tokens_per_frame: int,
-        kv_cache: dict,
     ) -> None:
-        """Compress KV cache from 14 frames to 6 frames."""
-        if kv_cache["mean_memory"]:
+        """Compress KV cache from 14 frames to 6 frames.
+
+        Args:
+            k_full: Full key tensor
+            v_full: Full value tensor
+            k_cache: Cache key tensor to update
+            v_cache: Cache value tensor to update
+            tokens_per_frame: Tokens per frame
+        """
+        if self.mean_memory:
             k_compress, v_compress = self.kv_mean, self.kv_mean
         else:
             k_compress, v_compress = self.k_compress, self.v_compress
@@ -322,51 +332,6 @@ class WanSelfAttention(nn.Module):
             :, 12 * tokens_per_frame : 14 * tokens_per_frame
         ]
 
-    def _move_kv_cache_to_device(self, kv_cache: dict, device):
-        kv_cache["k"] = kv_cache["k"].to(device=device, non_blocking=True)
-        kv_cache["v"] = kv_cache["v"].to(device=device, non_blocking=True)
-        if kv_cache.get("k_scale") is not None:
-            kv_cache["k_scale"] = kv_cache["k_scale"].to(device=device, non_blocking=True)
-        if kv_cache.get("v_scale") is not None:
-            kv_cache["v_scale"] = kv_cache["v_scale"].to(device=device, non_blocking=True)
-
-    def _quantize_kv_tensor(self, kv: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
-        fp8_max = torch.finfo(torch.float8_e4m3fn).max
-        scale = kv.detach().abs().amax(dim=-1, keepdim=True).to(torch.float32)
-        scale = torch.clamp(scale / fp8_max, min=1e-12)
-        q_kv = (kv / scale.to(dtype=kv.dtype)).to(torch.float8_e4m3fn)
-        return q_kv.contiguous(), scale.contiguous()
-
-    def _dequantize_kv_tensor(self, q_kv: torch.Tensor, scale: torch.Tensor, dtype) -> torch.Tensor:
-        return q_kv.to(dtype=dtype) * scale.to(device=q_kv.device, dtype=dtype)
-
-    def _load_kv_cache(self, kv_cache: dict, device, dtype) -> tuple[torch.Tensor, torch.Tensor]:
-        if kv_cache["offload_cache"]:
-            self._move_kv_cache_to_device(kv_cache, device)
-
-        if kv_cache.get("fp8_kv_cache", False):
-            k_cache = self._dequantize_kv_tensor(kv_cache["k"], kv_cache["k_scale"], dtype)
-            v_cache = self._dequantize_kv_tensor(kv_cache["v"], kv_cache["v_scale"], dtype)
-        else:
-            if kv_cache["k"].dtype != dtype:
-                kv_cache["k"] = kv_cache["k"].to(dtype=dtype)
-            if kv_cache["v"].dtype != dtype:
-                kv_cache["v"] = kv_cache["v"].to(dtype=dtype)
-            k_cache = kv_cache["k"]
-            v_cache = kv_cache["v"]
-        return k_cache, v_cache
-
-    def _store_kv_cache(self, kv_cache: dict, k_cache: torch.Tensor, v_cache: torch.Tensor):
-        if kv_cache.get("fp8_kv_cache", False):
-            kv_cache["k"], kv_cache["k_scale"] = self._quantize_kv_tensor(k_cache)
-            kv_cache["v"], kv_cache["v_scale"] = self._quantize_kv_tensor(v_cache)
-        else:
-            kv_cache["k"] = k_cache
-            kv_cache["v"] = v_cache
-
-        if kv_cache["offload_cache"]:
-            self._move_kv_cache_to_device(kv_cache, "cpu")
-
     def forward(
         self,
         x: torch.Tensor,
@@ -374,18 +339,18 @@ class WanSelfAttention(nn.Module):
         f: int,
         h: int,
         w: int,
-        kv_cache: dict = {},
+        kv_cache: KVCache,
         start_idx: int | None = None,
         end_idx: int | None = None,
         tokens_per_frame: int | None = None,
     ) -> tuple[torch.Tensor, None]:
-        """Self-attention with pre-computed RoPE frequencies.
+        """Self-attention with KVCache.
 
         Args:
             x: Input tensor [batch, seq_len, dim]
             freqs: Base frequencies tensor [max_len, head_dim_half]
             f, h, w: Grid dimensions (frames, height, width)
-            kv_cache: KV cache dictionary
+            kv_cache: KVCache instance
             start_idx: Starting token index for incremental generation
             end_idx: Ending token index for attention window
             tokens_per_frame: Pre-computed h*w (optional, for compatibility)
@@ -400,7 +365,8 @@ class WanSelfAttention(nn.Module):
             return q, k, v
 
         q, k, v = qkv_fn(x)
-        k_cache, v_cache = self._load_kv_cache(kv_cache, f"cuda:{int(os.getenv('RANK', 0))}", torch.bfloat16)
+
+        k_cache, v_cache = kv_cache.load(x.device, torch.bfloat16)
 
         # Use pre-computed tokens_per_frame (h * w)
         if tokens_per_frame is None:
@@ -444,9 +410,9 @@ class WanSelfAttention(nn.Module):
 
         # Update cache after attention
         if start_idx != 0:
-            self._compress_kv_cache(k_full, v_full, k_cache, v_cache, tokens_per_frame, kv_cache)
+            self._compress_kv_cache_simple(k_full, v_full, k_cache, v_cache, tokens_per_frame)
 
-        self._store_kv_cache(kv_cache, k_cache, v_cache)
+        kv_cache.store(k_cache, v_cache)
 
         # output projection
         x = x.flatten(2)
@@ -534,6 +500,7 @@ class WanAttentionBlock(nn.Module):
         eps: float = 1e-6,
         output_dim: int = 768,
         norm_input_visual: bool = True,
+        mean_memory: bool = False,
     ):
         super().__init__()
         self.dim = dim
@@ -546,7 +513,7 @@ class WanAttentionBlock(nn.Module):
 
         # layers
         self.norm1 = WanLayerNorm(dim, eps)
-        self.self_attn = WanSelfAttention(dim, num_heads, window_size, qk_norm, eps)
+        self.self_attn = WanSelfAttention(dim, num_heads, window_size, qk_norm, eps, mean_memory)
         self.norm3 = WanLayerNorm(dim, eps, elementwise_affine=True) if cross_attn_norm else nn.Identity()
         self.cross_attn = WanI2VCrossAttention(dim, num_heads, (-1, -1), qk_norm, eps)
         self.norm2 = WanLayerNorm(dim, eps)
@@ -577,14 +544,14 @@ class WanAttentionBlock(nn.Module):
         h: int,
         w: int,
         context: torch.Tensor,
-        kv_cache: dict = {},
+        kv_cache: KVCache,
         start_idx: int | None = None,
         end_idx: int | None = None,
         audio_embedding: torch.Tensor | None = None,
         skip_audio: bool = False,
         tokens_per_frame: int | None = None,
     ) -> torch.Tensor:
-        """Transformer block forward - same as original SoulX-LiveAct.
+        """Transformer block forward.
 
         Args:
             x: Input tensor [batch, seq_len, dim]
@@ -592,7 +559,7 @@ class WanAttentionBlock(nn.Module):
             freqs: Base frequencies tensor [max_len, head_dim_half]
             f, h, w: Grid dimensions (frames, height, width)
             context: Text conditioning
-            kv_cache: KV cache dictionary
+            kv_cache: KVCache instance for this layer
             start_idx: Starting token index for incremental generation
             end_idx: Ending token index for attention window
             audio_embedding: Audio conditioning tensor
@@ -793,6 +760,8 @@ class LiveActDiT(BaseModel):
         norm_input_visual: bool = True,
         norm_output_audio: bool = True,
         weight_init: bool = True,
+        # KV cache compression mode
+        mean_memory: bool = False,
     ):
         super().__init__()
 
@@ -814,6 +783,7 @@ class LiveActDiT(BaseModel):
         self.cross_attn_norm = cross_attn_norm
         self.eps = eps
         self.gradient_checkpointing = False
+        self.mean_memory = mean_memory
 
         self.norm_output_audio = norm_output_audio
         self.audio_window = audio_window
@@ -846,6 +816,7 @@ class LiveActDiT(BaseModel):
                     eps,
                     output_dim=output_dim,
                     norm_input_visual=norm_input_visual,
+                    mean_memory=mean_memory,
                 )
                 for _ in range(num_layers)
             ]
@@ -904,12 +875,12 @@ class LiveActDiT(BaseModel):
         y: list | None = None,
         audio: torch.Tensor | None = None,
         e0: torch.Tensor | None = None,
-        kv_cache: dict = {},
+        kv_cache: list[KVCache] = [],
         start_idx: int | None = None,
         end_idx: int | None = None,
         skip_audio: bool = False,
     ) -> torch.Tensor:
-        """DiT forward - same as original SoulX-LiveAct model_memory.py."""
+        """DiT forward with KVCache."""
         assert clip_fea is not None and y is not None
 
         # Move freqs to GPU if needed
@@ -964,8 +935,6 @@ class LiveActDiT(BaseModel):
         # Pre-compute tokens_per_frame (h * w)
         tokens_per_frame = h * w
         for block_index, block in enumerate(self.blocks):
-            if kv_cache.get(block_index) is None:
-                kv_cache[block_index] = {}
             x = block(
                 x,
                 kv_cache=kv_cache[block_index],
@@ -1066,6 +1035,16 @@ class LiveActDiT(BaseModel):
     def get_fsdp_module_names(self) -> list[str]:
         """Get module names for FSDP sharding."""
         return ["blocks"]
+
+    def set_mean_memory(self, mean_memory: bool) -> None:
+        """Set mean_memory mode for KV cache compression.
+
+        Args:
+            mean_memory: Use mean pooling instead of Conv1d for compression
+        """
+        self.mean_memory = mean_memory
+        for block in self.blocks:
+            block.self_attn.mean_memory = mean_memory
 
     @staticmethod
     def state_dict_converter():

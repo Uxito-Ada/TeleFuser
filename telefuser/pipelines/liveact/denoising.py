@@ -9,13 +9,13 @@ Handles the diffusion denoising process with:
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 from functools import partial
 from typing import Any
 
 import torch
 from tqdm import tqdm
 
+from telefuser.cache import KVCacheConfig, KVCacheManager
 from telefuser.core.base_stage import BaseStage, with_model_offload
 from telefuser.core.config import ModelRuntimeConfig, WeightOffloadType
 from telefuser.core.module_manager import ModuleManager
@@ -26,26 +26,6 @@ from telefuser.platforms import current_platform
 from telefuser.schedulers.flow_match import FlowMatchScheduler
 from telefuser.utils.logging import logger
 from telefuser.utils.profiler import ProfilingContext4Debug
-
-
-@dataclass
-class KVCacheConfig:
-    """Configuration for KV cache management.
-
-    Memory requirements for 480x832 video:
-    - bfloat16 on GPU: ~200 GB
-    - fp8 on GPU: ~100 GB
-    - bfloat16 on CPU (offload): ~200 GB CPU RAM, minimal GPU
-    - fp8 on CPU: ~100 GB CPU RAM, minimal GPU
-
-    Recommended for single GPU: offload_cache=True
-    """
-
-    enabled: bool = True
-    fp8_kv_cache: bool = False
-    offload_cache: bool = True  # Default: offload to CPU for single GPU
-    mean_memory: bool = False
-
 
 # Pre-defined timesteps matching original generate.py (created once)
 TIMESTEPS = [1000.0, 937.5, 833.33333333, 0.0]
@@ -66,6 +46,7 @@ class LiveActDenoisingStage(BaseStage):
         module_manager: ModuleManager,
         model_runtime_config: ModelRuntimeConfig,
         kv_cache_config: KVCacheConfig | None = None,
+        mean_memory: bool = False,
     ):
         super().__init__(name, model_runtime_config)
         self.dit = module_manager.fetch_module("liveact_dit")
@@ -73,6 +54,8 @@ class LiveActDenoisingStage(BaseStage):
         # Original SoulX-LiveAct WanModel uses SageAttention directly
         if hasattr(self.dit, "set_attention_config"):
             self.dit.set_attention_config(model_runtime_config.attention_config)
+        if hasattr(self.dit, "set_mean_memory"):
+            self.dit.set_mean_memory(mean_memory)
         self.model_names = ["dit"]
 
         # Enable FP8 GEMM and torch.compile only in single GPU mode
@@ -103,12 +86,12 @@ class LiveActDenoisingStage(BaseStage):
 
         self.scheduler = FlowMatchScheduler(template="Wan")
 
-        self.kv_cache: dict[int, dict[int, dict[str, Any]]] = {}
+        self.kv_cache_manager: KVCacheManager | None = None
         self.kv_cache_config = kv_cache_config or KVCacheConfig()
 
         self._timestep_tensors: list[torch.Tensor] | None = None
         self._kv_cache_tokens_per_frame: int | None = None
-        self._kv_cache_null_audio: dict | None = None
+        self._kv_cache_null_audio_manager: KVCacheManager | None = None
 
     def parallel_models(self) -> None:
         """Configure parallel processing for the DiT model.
@@ -180,7 +163,7 @@ class LiveActDenoisingStage(BaseStage):
         device: str | torch.device = "cuda",
         dtype: torch.dtype = torch.bfloat16,
         config: KVCacheConfig | None = None,
-    ) -> dict:
+    ) -> KVCacheManager:
         """Initialize KV cache for streaming generation.
 
         Args:
@@ -191,64 +174,36 @@ class LiveActDenoisingStage(BaseStage):
             config: KV cache configuration
 
         Returns:
-            Initialized KV cache dictionary
+            KVCacheManager instance
         """
         if config is not None:
             self.kv_cache_config = config
 
-        kv_cache_dtype = torch.float8_e4m3fn if self.kv_cache_config.fp8_kv_cache else dtype
-        kv_cache_device = "cpu" if self.kv_cache_config.offload_cache else device
-
-        # Get SP size for KV cache shape
-        # Original WanModel doesn't have device_mesh, use sp_size=1
+        # Get SP size from dit_model
         device_mesh = getattr(self.dit, "device_mesh", None)
         sp_size = get_ulysses_world_size(device_mesh) or 1
-        local_heads = self.num_heads // sp_size
 
-        # Total KV cache tokens: 6 frames (compressed history summary)
-        # KV cache shape: [1, seq, H/N, D] - full sequence, local heads
-        # This matches the layout after ulysses_scatter_heads in SP mode
-        kv_cache_tokens = tokens_per_frame * 6
-        kv_scale_shape = (1, kv_cache_tokens, local_heads, 1)
+        # Create KVCacheManager from dit model
+        manager = KVCacheManager.from_dit_model(
+            dit_model=self.dit,
+            config=self.kv_cache_config,
+            tokens_per_frame=tokens_per_frame,
+            num_timesteps=num_timesteps,
+            sp_size=sp_size,
+            device=device,
+            dtype=dtype,
+        )
 
-        kv_cache = {}
-        for t_idx in range(num_timesteps):
-            kv_cache[t_idx] = {}
-            for layer_id in range(self.num_layers):
-                kv_cache[t_idx][layer_id] = {
-                    "k": torch.zeros(
-                        [1, kv_cache_tokens, local_heads, self.head_dim],
-                        dtype=kv_cache_dtype,
-                        device=kv_cache_device,
-                    ),
-                    "v": torch.zeros(
-                        [1, kv_cache_tokens, local_heads, self.head_dim],
-                        dtype=kv_cache_dtype,
-                        device=kv_cache_device,
-                    ),
-                    "k_scale": (
-                        torch.ones(kv_scale_shape, dtype=torch.float32, device=kv_cache_device)
-                        if self.kv_cache_config.fp8_kv_cache
-                        else None
-                    ),
-                    "v_scale": (
-                        torch.ones(kv_scale_shape, dtype=torch.float32, device=kv_cache_device)
-                        if self.kv_cache_config.fp8_kv_cache
-                        else None
-                    ),
-                    "mean_memory": self.kv_cache_config.mean_memory,
-                    "offload_cache": self.kv_cache_config.offload_cache,
-                    "fp8_kv_cache": self.kv_cache_config.fp8_kv_cache,
-                }
-
-        self.kv_cache = kv_cache
-        return kv_cache
+        self.kv_cache_manager = manager
+        return manager
 
     def clear_kv_cache(self) -> None:
         """Clear KV cache and related state."""
-        self.kv_cache = {}
+        if self.kv_cache_manager is not None:
+            self.kv_cache_manager.clear()
+        self.kv_cache_manager = None
         self._kv_cache_tokens_per_frame = None
-        self._kv_cache_null_audio = None
+        self._kv_cache_null_audio_manager = None
 
     @with_model_offload(["dit"])
     @ProfilingContext4Debug("denoising_process")
@@ -277,6 +232,10 @@ class LiveActDenoisingStage(BaseStage):
         latent_blksz = latent.shape[1]
         f = 0 if latent_blksz == blksz_lst[0] else 1
 
+        # Pre-compute start/end indices (f doesn't change during loop)
+        start_idx = sum(blksz_lst[:f]) * tokens_per_frame
+        end_idx = sum(blksz_lst[: f + 1]) * tokens_per_frame
+
         # Profile KV cache initialization
         with ProfilingContext4Debug("init_kv_cache_check"):
             if self._kv_cache_tokens_per_frame != tokens_per_frame:
@@ -288,19 +247,15 @@ class LiveActDenoisingStage(BaseStage):
                 )
                 self._kv_cache_tokens_per_frame = tokens_per_frame
 
-        kv_cache_null_audio = None
-        if audio_cfg > 1.0 and self._kv_cache_null_audio is None:
-            self._kv_cache_null_audio = self.init_kv_cache(
+        if audio_cfg > 1.0 and self._kv_cache_null_audio_manager is None:
+            self._kv_cache_null_audio_manager = self.init_kv_cache(
                 tokens_per_frame,
                 num_timesteps=num_inference_steps,
                 device=self.device,
                 dtype=self.torch_dtype,
             )
-            kv_cache_null_audio = self._kv_cache_null_audio
-        elif audio_cfg > 1.0:
-            kv_cache_null_audio = self._kv_cache_null_audio
 
-        y_slice = y[:, :, sum(blksz_lst[:f]) : sum(blksz_lst[: f + 1]), ...]
+        y_slice = y[:, :, start_idx // tokens_per_frame : end_idx // tokens_per_frame, ...]
 
         timestep_tensors = self._get_timestep_tensors()
 
@@ -308,8 +263,10 @@ class LiveActDenoisingStage(BaseStage):
         for i in tqdm(range(len(TIMESTEPS) - 1), desc="liveact denoise"):
             timestep = timestep_tensors[i]
 
-            start_idx = sum(blksz_lst[:f]) * tokens_per_frame
-            end_idx = sum(blksz_lst[: f + 1]) * tokens_per_frame
+            # Get KVCache for this timestep (list of KVCache per layer)
+            kv_cache_timestep = self.kv_cache_manager.get_timestep_caches(i)
+            if audio_cfg > 1.0:
+                kv_cache_null_audio_timestep = self._kv_cache_null_audio_manager.get_timestep_caches(i)
 
             # Profile dit forward
             with ProfilingContext4Debug(f"dit_forward_t{i}"):
@@ -317,7 +274,7 @@ class LiveActDenoisingStage(BaseStage):
                 noise_pred = self.dit(
                     [latent],
                     t=timestep,
-                    kv_cache=self.kv_cache[i],
+                    kv_cache=kv_cache_timestep,
                     skip_audio=False,
                     context=context,
                     clip_fea=clip_fea,
@@ -328,11 +285,11 @@ class LiveActDenoisingStage(BaseStage):
                 )[0]
 
             # Audio CFG (same as original)
-            if audio_cfg > 1.0 and i in [1, 2] and kv_cache_null_audio is not None:
+            if audio_cfg > 1.0 and i in [1, 2] and kv_cache_null_audio_timestep is not None:
                 noise_pred_drop_audio = self.dit(
                     [latent],
                     t=timestep,
-                    kv_cache=kv_cache_null_audio[i],
+                    kv_cache=kv_cache_null_audio_timestep,
                     context=context,
                     clip_fea=clip_fea,
                     audio=torch.zeros_like(audio_embedding),

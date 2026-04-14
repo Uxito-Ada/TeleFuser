@@ -137,10 +137,6 @@ def get_pipeline(gpu_num: int, ckpt_dir: str, wav2vec_dir: str):
     # Freeze parameters
     for param in original_dit.parameters():
         param.requires_grad = False
-
-    # Mark as external model to prevent re-compilation/re-quantization in denoising stage
-    original_dit._is_external_model = True
-
     # Add original WanModel to module manager with "liveact_dit" name
     # This name is used by LiveActDenoisingStage to fetch the model
     mm.add_module(original_dit, "liveact_dit")
