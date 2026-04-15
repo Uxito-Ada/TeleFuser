@@ -75,6 +75,8 @@ class LinearFP8(nn.Module):
         weight_scale = self.weight_scale
         if self.weight_scale.dtype != torch.float32:
             weight_scale = self.weight_scale.to(torch.float32)
+        if self.bias.dtype != output_dtype:
+            self.bias.data = self.bias.to(output_dtype)
 
         output_tensor = tf_kernel.fp8_scaled_mm(
             input_tensor_quant,
@@ -99,6 +101,8 @@ class LinearFP8(nn.Module):
         if torch.is_autocast_enabled():
             output_dtype = torch.get_autocast_dtype(current_platform.device_type)
         output_tensor = torch.empty(shape, dtype=output_dtype, device=x.device, requires_grad=False)
+        if self.bias.dtype != output_dtype:
+            self.bias.data = self.bias.to(output_dtype)
 
         input_tensor_quant, input_tensor_scale = self.act_quant_fp8_perchannel_sym_vllm(x)
         weight_scale = self.weight_scale
