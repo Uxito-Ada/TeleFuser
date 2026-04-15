@@ -339,20 +339,16 @@ def block_sparse_attn(
         return x
 
     # Priority 3: sparse_sageattn (fallback)
-    # sparse_sageattn_fwd expects mask shape [B, H, ceil(S/128), ceil(S/64)].
-    # generate_draft_block_mask produces [B, H, num_windows, num_windows] with
-    # window_size=64 tokens, so Q-dim has twice as many rows as the kernel expects.
-    # Merge adjacent Q-row pairs with OR so each row covers 128 tokens.
-    B_m, H_m, Q_blocks, K_blocks = attention_mask.shape
-    if Q_blocks % 2 == 0:
-        merged = attention_mask.view(B_m, H_m, Q_blocks // 2, 2, K_blocks)
-        attention_mask = merged.any(dim=3)
+    # generate_draft_block_mask_sage uses split_k=True, which splits each 128-token K block
+    # into 2 sub-blocks of 64 tokens each. This aligns with kernel's BLOCK_N=64.
+    # Q dimension is already aligned: each Q block = 128 tokens (win=2*8*8) matches BLOCK_M=128.
+    # No Q-dimension merging needed - mask shape already matches kernel expectations.
 
     q = rearrange(q, "b s (n d) -> b n s d", n=num_heads)
     k = rearrange(k, "b s (n d) -> b n s d", n=num_heads)
     v = rearrange(v, "b s (n d) -> b n s d", n=num_heads)
 
-    x = sparse_sageattn(q, k, v, mask_id=attention_mask.to(torch.int8), is_causal=False)
+    x = sparse_sageattn(q, k, v, mask_id=attention_mask.to(torch.int8), is_causal=False, tensor_layout="HND")
     x = rearrange(x, "b n s d -> b s (n d)", n=num_heads)
     return x
 

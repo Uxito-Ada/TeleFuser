@@ -188,34 +188,54 @@ def _attn_fwd(
     tl.store(O_block_ptr, acc.to(Out.type.element_ty), mask=(offs_m[:, None] < qo_len))
 
 
-def forward(q, k, k_block_id, v, q_scale, k_scale, is_causal=False, output_dtype=torch.float16):
+def forward(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    k_block_id: torch.Tensor,
+    v: torch.Tensor,
+    q_scale: torch.Tensor,
+    k_scale: torch.Tensor,
+    is_causal: bool = False,
+    tensor_layout: str = "HND",
+    output_dtype: torch.dtype = torch.float16,
+) -> torch.Tensor:
     """Sparse INT8 attention forward pass.
 
     Args:
-        q: Query tensor [B, H, L, C] in HND format
-        k: Key tensor [B, H, L, C] in HND format
-        k_block_id: Key block ID tensor
-        v: Value tensor [B, H, L, C] in HND format
-        q_scale: Query scale tensor
-        k_scale: Key scale tensor
-        is_causal: Whether to use causal attention
-        output_dtype: Output dtype (default: torch.float16)
+        q: Query tensor. HND format: [B, H, L, C]; NHD format: [B, L, H, C]
+        k: Key tensor. HND format: [B, H, L, C]; NHD format: [B, L, H, C]
+        k_block_id: Key block ID tensor [B, H_kv, Q_blocks, K_blocks].
+        v: Value tensor. HND format: [B, H, L, C]; NHD format: [B, L, H, C]
+        q_scale: Query scale tensor.
+        k_scale: Key scale tensor.
+        is_causal: Whether to use causal attention.
+        tensor_layout: Tensor layout format ("HND" or "NHD").
+        output_dtype: Output dtype (default: torch.float16).
 
     Returns:
-        Output tensor
+        Output tensor with same shape and layout as input.
     """
     BLOCK_M = 128
     BLOCK_N = 64
     stage = 3 if is_causal else 1
     o = torch.empty(q.shape, dtype=output_dtype, device=q.device)
 
-    b, h_qo, qo_len, head_dim = q.shape
-    _, h_kv, kv_len, _ = k.shape
-
-    stride_bz_q, stride_h_q, stride_seq_q = q.stride(0), q.stride(1), q.stride(2)
-    stride_bz_k, stride_h_k, stride_seq_k = k.stride(0), k.stride(1), k.stride(2)
-    stride_bz_v, stride_h_v, stride_seq_v = v.stride(0), v.stride(1), v.stride(2)
-    stride_bz_o, stride_h_o, stride_seq_o = o.stride(0), o.stride(1), o.stride(2)
+    if tensor_layout == "HND":
+        b, h_qo, qo_len, head_dim = q.shape
+        _, h_kv, kv_len, _ = k.shape
+        stride_bz_q, stride_h_q, stride_seq_q = q.stride(0), q.stride(1), q.stride(2)
+        stride_bz_k, stride_h_k, stride_seq_k = k.stride(0), k.stride(1), k.stride(2)
+        stride_bz_v, stride_h_v, stride_seq_v = v.stride(0), v.stride(1), v.stride(2)
+        stride_bz_o, stride_h_o, stride_seq_o = o.stride(0), o.stride(1), o.stride(2)
+    elif tensor_layout == "NHD":
+        b, qo_len, h_qo, head_dim = q.shape
+        _, kv_len, h_kv, _ = k.shape
+        stride_bz_q, stride_h_q, stride_seq_q = q.stride(0), q.stride(2), q.stride(1)
+        stride_bz_k, stride_h_k, stride_seq_k = k.stride(0), k.stride(2), k.stride(1)
+        stride_bz_v, stride_h_v, stride_seq_v = v.stride(0), v.stride(2), v.stride(1)
+        stride_bz_o, stride_h_o, stride_seq_o = o.stride(0), o.stride(2), o.stride(1)
+    else:
+        raise ValueError(f"tensor_layout {tensor_layout} not supported")
 
     if is_causal:
         assert qo_len == kv_len, "qo_len and kv_len must be equal for causal attention"

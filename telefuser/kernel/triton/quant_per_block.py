@@ -59,19 +59,28 @@ def quant_per_block_int8_kernel(
     tl.store(scale_ptrs, scale)
 
 
-def per_block_int8(q, k, km=None, BLKQ=128, BLKK=64, sm_scale=None):
+def per_block_int8(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    km: torch.Tensor | None = None,
+    BLKQ: int = 128,
+    BLKK: int = 64,
+    sm_scale: float | None = None,
+    tensor_layout: str = "HND",
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Per-block INT8 quantization for attention.
 
     Args:
-        q: Query tensor [B, H, L, C] in HND format
-        k: Key tensor [B, H, L, C] in HND format
-        km: Optional key mean for subtraction
-        BLKQ: Block size for query
-        BLKK: Block size for key
-        sm_scale: Softmax scale (default: head_dim**-0.5)
+        q: Query tensor. HND format: [B, H, L, C]; NHD format: [B, L, H, C]
+        k: Key tensor. HND format: [B, H, L, C]; NHD format: [B, L, H, C]
+        km: Optional key mean for subtraction.
+        BLKQ: Block size for query (default: 128).
+        BLKK: Block size for key (default: 64).
+        sm_scale: Softmax scale (default: head_dim**-0.5).
+        tensor_layout: Tensor layout format ("HND" or "NHD").
 
     Returns:
-        Tuple of (q_int8, q_scale, k_int8, k_scale)
+        Tuple of (q_int8, q_scale, k_int8, k_scale).
     """
     q_int8 = torch.empty(q.shape, dtype=torch.int8, device=q.device)
     k_int8 = torch.empty(k.shape, dtype=torch.int8, device=k.device)
@@ -79,13 +88,24 @@ def per_block_int8(q, k, km=None, BLKQ=128, BLKK=64, sm_scale=None):
     if km is not None:
         k = k - km
 
-    b, h_qo, qo_len, head_dim = q.shape
-    _, h_kv, kv_len, _ = k.shape
+    if tensor_layout == "HND":
+        b, h_qo, qo_len, head_dim = q.shape
+        _, h_kv, kv_len, _ = k.shape
 
-    stride_bz_q, stride_h_q, stride_seq_q = q.stride(0), q.stride(1), q.stride(2)
-    stride_bz_qo, stride_h_qo, stride_seq_qo = q_int8.stride(0), q_int8.stride(1), q_int8.stride(2)
-    stride_bz_k, stride_h_k, stride_seq_k = k.stride(0), k.stride(1), k.stride(2)
-    stride_bz_ko, stride_h_ko, stride_seq_ko = k_int8.stride(0), k_int8.stride(1), k_int8.stride(2)
+        stride_bz_q, stride_h_q, stride_seq_q = q.stride(0), q.stride(1), q.stride(2)
+        stride_bz_qo, stride_h_qo, stride_seq_qo = q_int8.stride(0), q_int8.stride(1), q_int8.stride(2)
+        stride_bz_k, stride_h_k, stride_seq_k = k.stride(0), k.stride(1), k.stride(2)
+        stride_bz_ko, stride_h_ko, stride_seq_ko = k_int8.stride(0), k_int8.stride(1), k_int8.stride(2)
+    elif tensor_layout == "NHD":
+        b, qo_len, h_qo, head_dim = q.shape
+        _, kv_len, h_kv, _ = k.shape
+
+        stride_bz_q, stride_h_q, stride_seq_q = q.stride(0), q.stride(2), q.stride(1)
+        stride_bz_qo, stride_h_qo, stride_seq_qo = q_int8.stride(0), q_int8.stride(2), q_int8.stride(1)
+        stride_bz_k, stride_h_k, stride_seq_k = k.stride(0), k.stride(2), k.stride(1)
+        stride_bz_ko, stride_h_ko, stride_seq_ko = k_int8.stride(0), k_int8.stride(2), k_int8.stride(1)
+    else:
+        raise ValueError(f"Unknown tensor layout: {tensor_layout}")
 
     q_scale = torch.empty((b, h_qo, (qo_len + BLKQ - 1) // BLKQ), device=q.device, dtype=torch.float32)
     k_scale = torch.empty((b, h_kv, (kv_len + BLKK - 1) // BLKK), device=q.device, dtype=torch.float32)
