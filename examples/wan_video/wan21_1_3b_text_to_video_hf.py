@@ -25,11 +25,7 @@ from telefuser.utils.video import get_target_video_size_from_ratio, save_video
 # Configuration
 PPL_CONFIG = dict(
     name="wan21_1.3B_t2v_hf_simple",
-    # Model source: HF model ID or local path
-    # Examples:
-    #   model_source="Wan-AI/Wan2.1-T2V-1.3B"  # HF Model ID (auto-download)
-    #   model_source="/path/to/Wan2.1-T2V-1.3B"  # Local HF format folder
-    model_source=os.getenv("WAN21_MODEL_SOURCE", "Wan-AI/Wan2.1-T2V-1.3B"),
+    model_root=os.getenv("WAN21_MODEL_SOURCE", "Wan-AI/Wan2.1-T2V-1.3B"),  # HF model ID or local path
     negative_prompt="Camera shake, overly saturated colors, overexposed, static, blurry details, subtitles, style, artwork, painting, frame, still, overall grayish, worst quality, low quality, JPEG compression artifacts, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn face, deformed, disfigured, malformed limbs, fused fingers, static frames, cluttered background, three legs, crowded background, walking backwards",
     num_inference_steps=40,
     num_frames=81,
@@ -44,7 +40,7 @@ PPL_CONFIG = dict(
 )
 
 
-def get_pipeline(parallelism=1):
+def get_pipeline(parallelism=1, model_root=PPL_CONFIG["model_root"]):
     """
     Create pipeline using from_pretrained.
 
@@ -52,19 +48,18 @@ def get_pipeline(parallelism=1):
     the model from HuggingFace model ID or local HF format folder.
 
     Args:
-        parallelism: Number of parallel GPUs for inference
+        parallelism: Number of parallel GPUs (REQUIRED)
+        model_root: HF model ID or local path (REQUIRED)
 
     Returns:
         Initialized Wan21VideoPipeline
     """
-    model_source = PPL_CONFIG["model_source"]
-
-    logger.info(f"Loading model from: {model_source}")
+    logger.info(f"Loading model from: {model_root}")
     logger.info(f"Parallelism: {parallelism}")
 
     # Use from_pretrained to load model (supports both HF ID and local path)
     pipe = Wan21VideoPipeline.from_pretrained(
-        model_id_or_path=model_source,
+        model_id_or_path=model_root,
         device="cuda",
         torch_dtype=torch.bfloat16,
         attention_config=AttentionConfig.dense_attention(PPL_CONFIG["attn_impl"]),
@@ -139,8 +134,8 @@ def run_with_file(
 
 @click.command()
 @click.option(
-    "--model_source",
-    default=PPL_CONFIG["model_source"],
+    "--model_root",
+    default=PPL_CONFIG["model_root"],
     help="HF model ID or local path (e.g., 'Wan-AI/Wan2.1-T2V-1.3B')",
 )
 @click.option("--gpu_num", default=1, help="Number of GPUs to use")
@@ -154,7 +149,7 @@ def run_with_file(
 @click.option("--resolution", default=PPL_CONFIG["resolution"], help="Resolution (480p, 720p)")
 @click.option("--aspect_ratio", default="16:9", help="Aspect ratio (16:9, 4:3, 1:1)")
 def main(
-    model_source,
+    model_root,
     gpu_num,
     prompt,
     negative_prompt,
@@ -167,23 +162,20 @@ def main(
 
     Examples:
         # Using HF Model ID
-        python wan21_1_3b_text_to_video_hf_simple.py --model_source "Wan-AI/Wan2.1-T2V-1.3B"
+        python wan21_1_3b_text_to_video_hf.py --model_root "Wan-AI/Wan2.1-T2V-1.3B"
 
         # Using local HF format folder
-        python wan21_1_3b_text_to_video_hf_simple.py --model_source "/path/to/Wan2.1-T2V-1.3B"
+        python wan21_1_3b_text_to_video_hf.py --model_root "/path/to/Wan2.1-T2V-1.3B"
 
         # Multi-GPU
-        python wan21_1_3b_text_to_video_hf_simple.py --model_source "Wan-AI/Wan2.1-T2V-1.3B" --gpu_num 2
+        python wan21_1_3b_text_to_video_hf.py --model_root "Wan-AI/Wan2.1-T2V-1.3B" --gpu_num 2
     """
-    # Update config with CLI args
-    PPL_CONFIG["model_source"] = model_source
-
-    click.echo(f"Model source: {model_source}")
+    click.echo(f"Model root: {model_root}")
     click.echo(f"GPUs: {gpu_num}")
 
     # Load pipeline
     click.echo("Loading pipeline...")
-    pipe = get_pipeline(gpu_num)
+    pipe = get_pipeline(gpu_num, model_root)
 
     # Run inference
     click.echo("Generating video...")

@@ -1,4 +1,5 @@
 """
+
 Wan2.1 T2V 1.3B with Radial Attention - Efficient Video Generation.
 
 This example demonstrates how to use radial attention for memory-efficient
@@ -37,8 +38,10 @@ from telefuser.utils.logging import logger
 from telefuser.utils.utils import get_example_name
 from telefuser.utils.video import get_target_video_size_from_ratio, save_video
 
+TF_MODEL_ZOO_PATH = os.environ.get("TF_MODEL_ZOO_PATH", "model_zoo")
 PPL_CONFIG = dict(
     name="wan21_1.3B_t2v_radial",
+    model_root=TF_MODEL_ZOO_PATH + "/Wan2.1-T2V-1.3B",
     negative_prompt="Camera shake, overly saturated colors, overexposed, static, blurry details, subtitles, style, artwork, painting, frame, still, overall grayish, worst quality, low quality, JPEG compression artifacts, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn face, deformed, disfigured, malformed limbs, fused fingers, static frames, cluttered background, three legs, crowded background, walking backwards",
     num_inference_steps=40,
     num_frames=81,
@@ -53,7 +56,7 @@ PPL_CONFIG = dict(
 
 def get_pipeline(
     parallelism=1,
-    model_root="/dev/shm/Wan2.1-T2V-1.3B/",
+    model_root=PPL_CONFIG["model_root"],
     enable_radial=False,
     dense_layers=0,
     dense_timesteps=40,
@@ -62,8 +65,8 @@ def get_pipeline(
 ):
     """
     Args:
-        parallelism (int): Number of parallel GPUs for inference: 1, 2, 4 or 8
-        model_root (str): Root directory of the model files
+        parallelism (int): Number of parallel GPUs for inference (REQUIRED)
+        model_root (str): Root directory of the model files (REQUIRED)
         enable_radial (bool): Enable radial sparse attention
         dense_layers (int): Number of layers to use dense attention
         dense_timesteps (int): Number of timesteps to use dense attention
@@ -209,7 +212,7 @@ def run_with_file(
 @click.option("--seed", default=42, help="Random seed")
 @click.option("--resolution", default=PPL_CONFIG["resolution"], help="Resolution (480p, 720p)")
 @click.option("--aspect_ratio", default="16:9", help="Aspect ratio (16:9, 4:3, 1:1)")
-@click.option("--model_root", default="/dev/shm/Wan2.1-T2V-1.3B/", help="Root directory of the model files")
+@click.option("--model_root", default=PPL_CONFIG["model_root"], help="Root directory of the model files")
 @click.option("--enable_radial", is_flag=True, help="Enable radial sparse attention")
 @click.option("--dense_layers", default=0, help="Number of layers to use dense attention")
 @click.option("--dense_timesteps", default=40, help="Number of timesteps to use dense attention")

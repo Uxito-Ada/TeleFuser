@@ -1,4 +1,5 @@
 """
+
 Cache Calibrator Example for HunyuanVideo Image-to-Video
 
 This script runs the pipeline once to collect calibration data
@@ -45,8 +46,12 @@ from telefuser.utils.utils import get_example_name
 from telefuser.utils.video import get_target_image_size, save_video
 
 # Default configuration
+
+TF_MODEL_ZOO_PATH = os.environ.get("TF_MODEL_ZOO_PATH", "model_zoo")
+
 PPL_CONFIG = dict(
     name="hunyuan_video_i2v_cache_calibrate",
+    model_root=TF_MODEL_ZOO_PATH + "/HunyuanVideo-1.5",
     negative_prompt="",
     transformer_version="480p_i2v",
     sample_solver="euler",
@@ -59,13 +64,13 @@ PPL_CONFIG = dict(
 )
 
 
-def get_pipeline(parallelism: int = 1, model_root: str = "/root/models/HunyuanVideo-1.5"):
+def get_pipeline(parallelism: int = 1, model_root: str = PPL_CONFIG["model_root"]):
     """
     Create and initialize the HunyuanVideo I2V pipeline.
 
     Args:
-        parallelism: Number of parallel GPUs for inference
-        model_root: Root directory of the model checkpoints
+        parallelism: Number of parallel GPUs for inference (REQUIRED)
+        model_root: Root directory of the model checkpoints (REQUIRED)
     """
     module_manager = ModuleManager(device="cpu")
 
@@ -190,7 +195,7 @@ def run_calibration(
 )
 @click.option("--negative_prompt", default="", help="Negative guidance prompt")
 @click.option("--seed", default=42, help="Random seed")
-@click.option("--model_root", default="/root/models/HunyuanVideo-1.5", help="Model checkpoint root")
+@click.option("--model_root", default=PPL_CONFIG["model_root"], help="Model checkpoint root")
 @click.option("--model_name", default="HunyuanVideo-I2V", help="Model name for the output file")
 @click.option("--output_path", default=None, help="Output path for the JSON file (default: params directory)")
 @click.option("--resolution", default="480p", help="480p or 720p")

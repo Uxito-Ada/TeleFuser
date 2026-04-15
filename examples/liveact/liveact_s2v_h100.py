@@ -1,25 +1,3 @@
-"""LiveAct Example: Audio-conditioned Image-to-Video Generation with SP Parallelism.
-
-This example demonstrates how to use the LiveAct pipeline for generating
-talking head videos from an input image and audio with Ulysses Sequence Parallel.
-
-Usage:
-    # Single GPU
-    python examples/liveact/liveact_s2v.py --gpu_num 1 \
-        --ckpt_dir path/to/checkpoints --wav2vec_dir path/to/wav2vec2 \
-        --image path/to/image.jpg --audio path/to/audio.wav
-
-    # Multi-GPU SP (2 GPUs)
-    python examples/liveact/liveact_s2v.py --gpu_num 2 \
-        --ckpt_dir path/to/checkpoints --wav2vec_dir path/to/wav2vec2 \
-        --image path/to/image.jpg --audio path/to/audio.wav
-
-    # Multi-GPU SP (4 GPUs)
-    python examples/liveact/liveact_s2v.py --gpu_num 4 \
-        --ckpt_dir path/to/checkpoints --wav2vec_dir path/to/wav2vec2 \
-        --image path/to/image.jpg --audio path/to/audio.wav
-"""
-
 import os
 import time
 
@@ -31,16 +9,23 @@ from telefuser.core.config import AttentionConfig, AttnImplType, CompileConfig, 
 from telefuser.core.module_manager import ModuleManager
 from telefuser.models.wav2vec2 import Wav2Vec2Model
 from telefuser.pipelines.liveact import LiveActPipeline, LiveActPipelineConfig
+from telefuser.platforms.cuda import CudaPlatform
 from telefuser.utils.utils import get_example_name
 from telefuser.utils.video import save_video
 
+TF_MODEL_ZOO_PATH = os.environ.get("TF_MODEL_ZOO_PATH", "model_zoo")
+CudaPlatform.init_cudnn_optimizations()
+
 PPL_CONFIG = dict(
+    name="liveact_s2v",
+    model_root=TF_MODEL_ZOO_PATH + "/LiveAct",
+    wav2vec_dir=TF_MODEL_ZOO_PATH + "/chinese-wav2vec2-base",
     num_inference_steps=3,
     audio_cfg=1.0,
-    fps=24,
+    fps=20,
     seed=42,
-    height=480,
-    width=832,
+    height=720,
+    width=416,
     # Attention configuration - modify this to change attention implementation
     attn_impl=AttnImplType.SAGE_ATTN_2_8_8_SM90,
     # Quantization and compile configuration
@@ -55,32 +40,32 @@ PPL_CONFIG = dict(
 )
 
 
-def get_pipeline(gpu_num: int, ckpt_dir: str, wav2vec_dir: str):
+def get_pipeline(parallelism=1, model_root=PPL_CONFIG["model_root"]):
     """Load LiveAct pipeline with optional SP parallelism.
 
     Args:
-        gpu_num: Number of GPUs for parallel inference (1, 2, or 4)
-        ckpt_dir: Path to model checkpoints (LiveAct weights)
-        wav2vec_dir: Path to wav2vec2 weights
+        parallelism: Number of GPUs for parallel inference (REQUIRED)
+        model_root: Path to model checkpoints (REQUIRED)
 
     Returns:
         LiveActPipeline instance
     """
+    wav2vec_dir = PPL_CONFIG["wav2vec_dir"]
     torch_dtype = torch.bfloat16
 
     mm = ModuleManager(torch_dtype=torch_dtype, device="cpu")
 
     mm.load_models(
         [
-            os.path.join(ckpt_dir, "diffusion_pytorch_model-*.safetensors"),
+            os.path.join(model_root, "diffusion_pytorch_model-*.safetensors"),
         ],
         torch_dtype=torch_dtype,
     )
     mm.load_models(
         [
-            os.path.join(ckpt_dir, "Wan2.1_VAE.pth"),
-            os.path.join(ckpt_dir, "models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth"),
-            os.path.join(ckpt_dir, "models_t5_umt5-xxl-enc-bf16.pth"),
+            os.path.join(model_root, "Wan2.1_VAE.pth"),
+            os.path.join(model_root, "models_clip_open-clip-xlm-roberta-large-vit-huge-14.pth"),
+            os.path.join(model_root, "models_t5_umt5-xxl-enc-bf16.pth"),
         ],
         torch_dtype=torch_dtype,
     )
@@ -99,11 +84,11 @@ def get_pipeline(gpu_num: int, ckpt_dir: str, wav2vec_dir: str):
     config.vae_config.compile_config = CompileConfig(enabled=PPL_CONFIG["vae_compile"])
 
     # Configure SP parallelism for multi-GPU
-    if gpu_num > 1:
-        config.dit_config.parallel_config.sp_ulysses_degree = gpu_num
-        config.dit_config.parallel_config.device_ids = list(range(gpu_num))
+    if parallelism > 1:
+        config.dit_config.parallel_config.sp_ulysses_degree = parallelism
+        config.dit_config.parallel_config.device_ids = list(range(parallelism))
         config.enable_denoising_parallel = True
-        print(f"Enabled Ulysses Sequence Parallel with {gpu_num} GPUs")
+        print(f"Enabled Ulysses Sequence Parallel with {parallelism} GPUs")
 
     pipeline.init(mm, config)
     return pipeline
@@ -136,8 +121,8 @@ def run(
     """
     frames = pipeline(
         prompt=prompt,
-        input_image=Image.open(image).convert("RGB"),
         audio_path=audio_path,
+        input_image=image,
         height=height,
         width=width,
         fps=fps,
@@ -149,10 +134,9 @@ def run(
 
 @click.command()
 @click.option("--gpu_num", default=1, help="Number of GPUs to use (1, 2, or 4), default is 1")
-@click.option("--ckpt_dir", required=True, help="Path to LiveAct checkpoints")
-@click.option("--wav2vec_dir", required=True, help="Path to wav2vec2 weights")
-@click.option("--image", required=True, help="Path to input image")
-@click.option("--audio", required=True, help="Path to audio file")
+@click.option("--model_root", default=PPL_CONFIG["model_root"], help="Path to LiveAct checkpoints")
+@click.option("--image_path", default=f"{os.path.dirname(__file__)}/../data/1.png", help="Path to input image")
+@click.option("--audio_path", default=f"{os.path.dirname(__file__)}/../data/1.wav", help="Path to audio file")
 @click.option("--prompt", default="A person talking naturally", help="Text prompt")
 @click.option("--height", default=PPL_CONFIG["height"], help="Video height")
 @click.option("--width", default=PPL_CONFIG["width"], help="Video width")
@@ -160,10 +144,9 @@ def run(
 @click.option("--output", default=None, help="Output video path (default: liveact_i2v_sp_{gpu_num}gpu.mp4)")
 def main(
     gpu_num: int,
-    ckpt_dir: str,
-    wav2vec_dir: str,
-    image: str,
-    audio: str,
+    model_root: str,
+    image_path: str,
+    audio_path: str,
     prompt: str,
     height: int,
     width: int,
@@ -171,10 +154,10 @@ def main(
     output: str | None,
 ):
     """LiveAct: Generate talking head video from image and audio with SP parallelism."""
-    pipeline = get_pipeline(gpu_num, ckpt_dir, wav2vec_dir)
-
+    pipeline = get_pipeline(gpu_num, model_root)
+    input_image = (Image.open(image_path).convert("RGB"),)
     start = time.time()
-    frames = run(pipeline, image, audio, prompt, height, width, fps)
+    frames = run(pipeline, input_image, audio_path, prompt, height, width, fps)
     elapsed = time.time() - start
     print(f"Video generation time: {elapsed:.2f} seconds")
 
@@ -182,7 +165,7 @@ def main(
         filename = get_example_name(__file__).replace(".py", f"_{gpu_num}gpu.mp4")
         output_dir = os.getenv("TELEAI_EXAMPLE_OUTPUT_DIR", "./")
         output = os.path.join(output_dir, filename)
-    save_video(frames, output, fps=fps, audio_path=audio, quality=6)
+    save_video(frames, output, fps=fps, audio_path=audio_path, quality=6)
     print(f"Video saved to: {output}")
 
 

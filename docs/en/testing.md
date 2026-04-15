@@ -329,6 +329,25 @@ pipelines:
       attn_impl: FLASH_ATTN_2
 ```
 
+### Environment Variables
+
+Before running regression tests, set the `TF_MODEL_ZOO_PATH` environment variable to specify the model zoo root directory:
+
+```bash
+# Set model zoo path
+export TF_MODEL_ZOO_PATH=/path/to/model_zoo
+
+# Run regression tests
+python examples/run_examples.py --all
+```
+
+This environment variable is used by example scripts to locate model files:
+- `vae_path`: `TF_MODEL_ZOO_PATH/Wan2.1-T2V-1.3B/Wan2.1_VAE.pth`
+- `model_root`: `TF_MODEL_ZOO_PATH/LongCat-Video` (for LongCat examples)
+- `vfi_model_path`: `TF_MODEL_ZOO_PATH/RIFEv4.26_0921/flownet.pkl`
+
+If not set, defaults to `"model_zoo"` (relative to working directory).
+
 ### Pipeline Config Fields
 
 | Field | Type | Default | Description |

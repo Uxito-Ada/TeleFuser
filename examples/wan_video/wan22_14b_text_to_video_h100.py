@@ -1,5 +1,6 @@
 """Wan2.2 14B Text-to-Video (T2V) example.
 
+
 This example demonstrates text-to-video generation using Wan2.2 14B model
 without requiring an input image.
 
@@ -22,9 +23,10 @@ from telefuser.pipelines.wan_video.wan22_video import (
 from telefuser.utils.utils import get_example_name
 from telefuser.utils.video import get_target_video_size_from_ratio, save_video
 
+TF_MODEL_ZOO_PATH = os.environ.get("TF_MODEL_ZOO_PATH", "model_zoo")
 PPL_CONFIG = dict(
     name="wan22_A14B_t2v_h100",
-    model_root="/storage/model_zoo/Wan2.2-T2V-A14B",
+    model_root=TF_MODEL_ZOO_PATH + "/Wan2.2-T2V-14B",
     negative_prompt="Overly saturated colors, overexposed, static, blurry details, subtitles, style, artwork, painting, frame, still, overall grayish, worst quality, low quality, JPEG compression artifacts, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn face, deformed, disfigured, malformed limbs, fused fingers, static frames, cluttered background, three legs, crowded background, walking backwards",
     num_inference_steps=40,
     num_frames=81,
@@ -37,24 +39,10 @@ PPL_CONFIG = dict(
     boundary=0.9,
     sample_solver="euler",
     attn_impl=AttnImplType.TORCH_SDPA,
-    dit_high_path_list=[
-        "high_noise_model/diffusion_pytorch_model-00001-of-00006.safetensors",
-        "high_noise_model/diffusion_pytorch_model-00002-of-00006.safetensors",
-        "high_noise_model/diffusion_pytorch_model-00003-of-00006.safetensors",
-        "high_noise_model/diffusion_pytorch_model-00004-of-00006.safetensors",
-        "high_noise_model/diffusion_pytorch_model-00005-of-00006.safetensors",
-        "high_noise_model/diffusion_pytorch_model-00006-of-00006.safetensors",
-    ],
-    dit_low_path_list=[
-        "low_noise_model/diffusion_pytorch_model-00001-of-00006.safetensors",
-        "low_noise_model/diffusion_pytorch_model-00002-of-00006.safetensors",
-        "low_noise_model/diffusion_pytorch_model-00003-of-00006.safetensors",
-        "low_noise_model/diffusion_pytorch_model-00004-of-00006.safetensors",
-        "low_noise_model/diffusion_pytorch_model-00005-of-00006.safetensors",
-        "low_noise_model/diffusion_pytorch_model-00006-of-00006.safetensors",
-    ],
-    enable_feature_cache_dit_high=False,
-    enable_feature_cache_dit_low=False,
+    dit_high_path_list="high_noise_model/diffusion_pytorch_model-0000*-of-00006.safetensors",
+    dit_low_path_list="low_noise_model/diffusion_pytorch_model-0000*-of-00006.safetensors",
+    enable_feature_cache_dit_high=True,
+    enable_feature_cache_dit_low=True,
     model_type="Wan2_2-T2V-14B",
     target_fps=16,
 )
@@ -77,12 +65,12 @@ def get_pipeline(parallelism=1, model_root=PPL_CONFIG["model_root"]):
     )
     # dit high
     module_manager.load_model(
-        [os.path.join(model_root, filename) for filename in ppl_config["dit_high_path_list"]],
+        os.path.join(model_root, PPL_CONFIG["dit_high_path_list"]),
         torch_dtype=torch.bfloat16,
     )
     # dit low
     module_manager.load_model(
-        [os.path.join(model_root, filename) for filename in ppl_config["dit_low_path_list"]],
+        os.path.join(model_root, PPL_CONFIG["dit_low_path_list"]),
         torch_dtype=torch.bfloat16,
     )
 
@@ -191,7 +179,7 @@ def run(
 @click.option("--aspect_ratio", default="16:9", help="Aspect ratio: 16:9, 9:16, 1:1, etc.")
 @click.option(
     "--model_root",
-    default="/nvfile-heatstorage/model_zoo/modelscope/Wan2.2-T2V-14B",
+    default=PPL_CONFIG["model_root"],
     help="Root directory of the model files",
 )
 def main(

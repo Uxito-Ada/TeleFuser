@@ -1,4 +1,5 @@
 """
+
 Cache Calibrator Example for Qwen-Image
 
 This script runs the pipeline once to collect calibration data
@@ -37,8 +38,12 @@ from telefuser.utils.logging import logger
 from telefuser.utils.utils import get_example_name
 
 # Default configuration
+
+TF_MODEL_ZOO_PATH = os.environ.get("TF_MODEL_ZOO_PATH", "model_zoo")
+
 PPL_CONFIG = dict(
     name="qwen_image_cache_calibrate",
+    model_root=TF_MODEL_ZOO_PATH + "/Qwen-Image-2512",
     negative_prompt="低分辨率，低画质，肢体畸形，手指畸形，画面过饱和，蜡像感，人脸无细节，过度光滑，画面具有AI感。构图混乱。文字模糊，扭曲。",
     num_inference_steps=50,
     cfg_scale=4.0,
@@ -48,23 +53,34 @@ PPL_CONFIG = dict(
 )
 
 
-def get_pipeline(
-    dit_path: list[str],
-    vae_path: list[str],
-    text_encoder_path: list[str],
-    tokenizer_path: str,
-    parallelism: int = 1,
-):
+def get_pipeline(parallelism: int = 1, model_root: str = PPL_CONFIG["model_root"]):
     """
     Create and initialize the image generation pipeline.
 
     Args:
-        dit_path: Path to DiT model weights
-        vae_path: Path to VAE model weights
-        text_encoder_path: Path to text encoder weights
-        tokenizer_path: Path to tokenizer
         parallelism: Number of parallel GPUs for inference
+        model_root: Root directory of the model files
     """
+    dit_path = [
+        f"{model_root}/transformer/diffusion_pytorch_model-00001-of-00009.safetensors",
+        f"{model_root}/transformer/diffusion_pytorch_model-00002-of-00009.safetensors",
+        f"{model_root}/transformer/diffusion_pytorch_model-00003-of-00009.safetensors",
+        f"{model_root}/transformer/diffusion_pytorch_model-00004-of-00009.safetensors",
+        f"{model_root}/transformer/diffusion_pytorch_model-00005-of-00009.safetensors",
+        f"{model_root}/transformer/diffusion_pytorch_model-00006-of-00009.safetensors",
+        f"{model_root}/transformer/diffusion_pytorch_model-00007-of-00009.safetensors",
+        f"{model_root}/transformer/diffusion_pytorch_model-00008-of-00009.safetensors",
+        f"{model_root}/transformer/diffusion_pytorch_model-00009-of-00009.safetensors",
+    ]
+    vae_path = [f"{model_root}/vae/diffusion_pytorch_model.safetensors"]
+    text_encoder_path = [
+        f"{model_root}/text_encoder/model-00001-of-00004.safetensors",
+        f"{model_root}/text_encoder/model-00002-of-00004.safetensors",
+        f"{model_root}/text_encoder/model-00003-of-00004.safetensors",
+        f"{model_root}/text_encoder/model-00004-of-00004.safetensors",
+    ]
+    tokenizer_path = f"{model_root}/tokenizer"
+
     mm = ModuleManager(torch_dtype=torch.bfloat16, device="cpu")
     mm.load_model(dit_path, device="cpu", torch_dtype=torch.bfloat16)
     mm.load_model(vae_path, device="cpu", torch_dtype=torch.bfloat16)
@@ -154,7 +170,7 @@ def run_calibration(
 @click.option("--aspect_ratio", default="16:9", help="Aspect ratio such as 16:9, 1:1")
 @click.option(
     "--model_root",
-    default="/nvfile-heatstorage/model_zoo/huggingface/Qwen-Image-2512/",
+    default=PPL_CONFIG["model_root"],
     help="Root directory of the model files",
 )
 @click.option("--model_name", default="Qwen-Image-2512", help="Model name for the output file")
@@ -174,33 +190,7 @@ def main(
     logger.info("Cache Calibrator for Qwen-Image")
     logger.info("=" * 60)
 
-    dit_path = [
-        f"{model_root}/transformer/diffusion_pytorch_model-00001-of-00009.safetensors",
-        f"{model_root}/transformer/diffusion_pytorch_model-00002-of-00009.safetensors",
-        f"{model_root}/transformer/diffusion_pytorch_model-00003-of-00009.safetensors",
-        f"{model_root}/transformer/diffusion_pytorch_model-00004-of-00009.safetensors",
-        f"{model_root}/transformer/diffusion_pytorch_model-00005-of-00009.safetensors",
-        f"{model_root}/transformer/diffusion_pytorch_model-00006-of-00009.safetensors",
-        f"{model_root}/transformer/diffusion_pytorch_model-00007-of-00009.safetensors",
-        f"{model_root}/transformer/diffusion_pytorch_model-00008-of-00009.safetensors",
-        f"{model_root}/transformer/diffusion_pytorch_model-00009-of-00009.safetensors",
-    ]
-    vae_path = [f"{model_root}/vae/diffusion_pytorch_model.safetensors"]
-    text_encoder_path = [
-        f"{model_root}/text_encoder/model-00001-of-00004.safetensors",
-        f"{model_root}/text_encoder/model-00002-of-00004.safetensors",
-        f"{model_root}/text_encoder/model-00003-of-00004.safetensors",
-        f"{model_root}/text_encoder/model-00004-of-00004.safetensors",
-    ]
-    tokenizer_path = f"{model_root}/tokenizer"
-
-    pipe = get_pipeline(
-        dit_path=dit_path,
-        vae_path=vae_path,
-        text_encoder_path=text_encoder_path,
-        tokenizer_path=tokenizer_path,
-        parallelism=gpu_num,
-    )
+    pipe = get_pipeline(parallelism=gpu_num, model_root=model_root)
 
     full_negative = (
         f"{negative_prompt} {PPL_CONFIG['negative_prompt']}" if negative_prompt else PPL_CONFIG["negative_prompt"]

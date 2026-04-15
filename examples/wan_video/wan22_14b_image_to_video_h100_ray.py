@@ -22,9 +22,10 @@ from telefuser.pipelines.wan_video.wan22_video import (
 from telefuser.utils.utils import get_example_name
 from telefuser.utils.video import get_target_image_size, save_video
 
+TF_MODEL_ZOO_PATH = os.environ.get("TF_MODEL_ZOO_PATH", "model_zoo")
 PPL_CONFIG = dict(
     name="wan22_A14B_i2v_h100_distill",
-    model_root="/nvfile-heatstorage/model_zoo/modelscope/Wan2.2-I2V-A14B",
+    model_root=TF_MODEL_ZOO_PATH + "/Wan2.2-I2V-A14B",
     negative_prompt="Overly saturated colors, overexposed, static, blurry details, subtitles, style, artwork, painting, frame, still, overall grayish, worst quality, low quality, JPEG compression artifacts, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn face, deformed, disfigured, malformed limbs, fused fingers, static frames, cluttered background, three legs, crowded background, walking backwards",
     num_inference_steps=8,
     num_frames=81,
@@ -38,23 +39,20 @@ PPL_CONFIG = dict(
     sigma_shift=5.0,
     boundary=0.9,
     sample_solver="euler",
-    dit_high_path_list=[
-        "/nvfile-heatstorage/model_zoo/modelscope/Wan2.2-I2V-A14B/dit_high_noise_distill_model_bf16_1022_ecab7.safetensors",
-    ],
-    dit_low_path_list=[
-        "/nvfile-heatstorage/model_zoo/modelscope/Wan2.2-I2V-A14B/dit_low_noise_distill_model_bf16_1022_200c2.safetensors",
-    ],
+    dit_high_path_list="high_noise_model/diffusion_pytorch_model-0000*-of-00006.safetensors",
+    dit_low_path_list="low_noise_model/diffusion_pytorch_model-0000*-of-00006.safetensors",
 )
 
 
-def get_pipeline(num_gpus=2):
+def get_pipeline(parallelism: int = 2, model_root: str = PPL_CONFIG["model_root"]):
     """
     Pipeline configuration for distributed inference using Ray
 
     Args:
-        num_gpus (int): Number of GPUs to use, default is 2 GPUs
+        parallelism (int): Number of parallel GPUs to use, default is 2 GPUs
+        model_root (str): Root directory of the model files
     """
-    model_root = PPL_CONFIG["model_root"]
+    num_gpus = parallelism
 
     # Load models
     module_manager = ModuleManager(device="cpu")
@@ -66,12 +64,12 @@ def get_pipeline(num_gpus=2):
     )
     # dit high
     module_manager.load_model(
-        PPL_CONFIG["dit_high_path_list"],
+        os.path.join(model_root, PPL_CONFIG["dit_high_path_list"]),
         torch_dtype=torch.bfloat16,
     )
     # dit low
     module_manager.load_model(
-        PPL_CONFIG["dit_low_path_list"],
+        os.path.join(model_root, PPL_CONFIG["dit_low_path_list"]),
         torch_dtype=torch.bfloat16,
     )
     # t5
@@ -196,7 +194,7 @@ def main(
 
     # Initialize Ray
     ray.init(num_gpus=gpu_num)
-    pipe = get_pipeline(gpu_num)
+    pipe = get_pipeline(gpu_num, model_root)
     image = Image.open(image_path).convert("RGB")
 
     # Run inference

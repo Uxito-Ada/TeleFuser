@@ -14,9 +14,10 @@ from telefuser.pipelines.wan_video.wan22_video import (
 from telefuser.utils.utils import get_example_name
 from telefuser.utils.video import get_target_image_size, save_video
 
+TF_MODEL_ZOO_PATH = os.environ.get("TF_MODEL_ZOO_PATH", "model_zoo")
 PPL_CONFIG = dict(
     name="wan22_A14B_i2v_h100_distill",
-    model_root="/nvfile-heatstorage/model_zoo/modelscope/Wan2.2-I2V-A14B",
+    model_root=TF_MODEL_ZOO_PATH + "/Wan2.2-I2V-A14B",
     negative_prompt="Overly saturated colors, overexposed, static, blurry details, subtitles, style, artwork, painting, frame, still, overall grayish, worst quality, low quality, JPEG compression artifacts, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn face, deformed, disfigured, malformed limbs, fused fingers, static frames, cluttered background, three legs, crowded background, walking backwards",
     num_inference_steps=8,
     num_frames=81,
@@ -31,6 +32,9 @@ PPL_CONFIG = dict(
     boundary=0.9,
     sample_solver="euler",
     target_fps=16,
+    dit_high_path=TF_MODEL_ZOO_PATH
+    + "/Wan2.2-Distill-Models/wan2.2_i2v_A14b_high_noise_lightx2v_4step_1030.safetensors",
+    dit_low_path=TF_MODEL_ZOO_PATH + "/Wan2.2-Distill-Models/wan2.2_i2v_A14b_low_noise_lightx2v_4step.safetensors",
 )
 
 
@@ -49,12 +53,12 @@ def get_pipeline(parallelism=1, model_root=PPL_CONFIG["model_root"]):
     )
     # dit high
     module_manager.load_model(
-        f"{model_root}/dit_high_noise_distill_model_bf16_1022_ecab7.safetensors",
+        PPL_CONFIG["dit_high_path"],
         torch_dtype=torch.bfloat16,
     )
     # dit low
     module_manager.load_model(
-        f"{model_root}/dit_low_noise_distill_model_bf16_1022_200c2.safetensors",
+        PPL_CONFIG["dit_low_path"],
         torch_dtype=torch.bfloat16,
     )
 
@@ -96,6 +100,9 @@ def get_pipeline(parallelism=1, model_root=PPL_CONFIG["model_root"]):
         pipe_config.vae_config.offload_config.offload_type = WeightOffloadType.MODEL_CPU_OFFLOAD
         pipe_config.vae_config.parallel_config.device_ids = list(range(parallelism))
         pipe_config.vae_config.parallel_config.dp_degree = parallelism
+    else:
+        pipe_config.dit_high_config.offload_config.offload_type = WeightOffloadType.MODEL_CPU_OFFLOAD
+        pipe_config.dit_high_config.offload_config.offload_type = WeightOffloadType.MODEL_CPU_OFFLOAD
     pipe.init(module_manager, pipe_config)
     return pipe
 

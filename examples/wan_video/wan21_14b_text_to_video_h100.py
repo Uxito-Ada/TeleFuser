@@ -1,5 +1,6 @@
 """Wan2.1 14B Text-to-Video (T2V) example.
 
+
 This example demonstrates text-to-video generation using Wan2.1 14B model
 without requiring an input image.
 
@@ -22,9 +23,10 @@ from telefuser.pipelines.wan_video.wan21_video import (
 from telefuser.utils.utils import get_example_name
 from telefuser.utils.video import get_target_video_size_from_ratio, save_video
 
+TF_MODEL_ZOO_PATH = os.environ.get("TF_MODEL_ZOO_PATH", "model_zoo")
 PPL_CONFIG = dict(
     name="wan21_14B_t2v_h100",
-    model_root="/nvfile-heatstorage/model_zoo/modelscope/Wan2.1-T2V-14B",
+    model_root=TF_MODEL_ZOO_PATH + "/Wan2.1-T2V-14B",
     negative_prompt="Camera shake, overly saturated colors, overexposed, static, blurry details, subtitles, style, artwork, painting, frame, still, overall grayish, worst quality, low quality, JPEG compression artifacts, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn face, deformed, disfigured, malformed limbs, fused fingers, static frames, cluttered background, three legs, crowded background, walking backwards",
     num_inference_steps=40,
     num_frames=81,

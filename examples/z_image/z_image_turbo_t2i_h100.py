@@ -1,3 +1,4 @@
+import os
 import time
 
 import click
@@ -12,21 +13,15 @@ from telefuser.pipelines.z_image import (
 )
 from telefuser.utils.utils import get_example_name
 
+TF_MODEL_ZOO_PATH = os.environ.get("TF_MODEL_ZOO_PATH", "model_zoo")
 PPL_CONFIG = dict(
     name="z_image_turbo_t2i",
-    dit_path=[
-        "/nvfile-heatstorage/model_zoo/huggingface/Z-Image-Turbo/transformer/diffusion_pytorch_model-00001-of-00003.safetensors",
-        "/nvfile-heatstorage/model_zoo/huggingface/Z-Image-Turbo/transformer/diffusion_pytorch_model-00002-of-00003.safetensors",
-        "/nvfile-heatstorage/model_zoo/huggingface/Z-Image-Turbo/transformer/diffusion_pytorch_model-00003-of-00003.safetensors",
-    ],
-    vae_path="/nvfile-heatstorage/model_zoo/huggingface/Z-Image-Turbo/vae",
-    text_encoder_path=[
-        "/nvfile-heatstorage/model_zoo/huggingface/Z-Image-Turbo/text_encoder/model-00001-of-00003.safetensors",
-        "/nvfile-heatstorage/model_zoo/huggingface/Z-Image-Turbo/text_encoder/model-00002-of-00003.safetensors",
-        "/nvfile-heatstorage/model_zoo/huggingface/Z-Image-Turbo/text_encoder/model-00003-of-00003.safetensors",
-    ],
-    tokenizer_path="/nvfile-heatstorage/model_zoo/huggingface/Z-Image-Turbo/tokenizer",
-    scheduler_path="/nvfile-heatstorage/model_zoo/huggingface/Z-Image-Turbo/scheduler",
+    model_root=TF_MODEL_ZOO_PATH + "/Z-Image-Turbo",
+    dit_path="transformer/diffusion_pytorch_model-0000*-of-00003.safetensors",
+    vae_path="vae",
+    text_encoder_path="text_encoder/model-0000*-of-00003.safetensors",
+    tokenizer_path="tokenizer",
+    scheduler_path="scheduler",
     attn_impl=AttnImplType.TORCH_SDPA,
     seed=42,
     cfg_scale=0,
@@ -34,19 +29,23 @@ PPL_CONFIG = dict(
 )
 
 
-def get_pipeline(parallelism=1):
+def get_pipeline(parallelism=1, model_root=PPL_CONFIG["model_root"]):
     mm = ModuleManager(torch_dtype=torch.bfloat16, device="cpu")
-    mm.load_model(PPL_CONFIG["dit_path"], device="cpu", torch_dtype=torch.bfloat16)
+    mm.load_model(os.path.join(model_root, PPL_CONFIG["dit_path"]), device="cpu", torch_dtype=torch.bfloat16)
     mm.load_from_huggingface(
-        PPL_CONFIG["vae_path"],
+        os.path.join(model_root, PPL_CONFIG["vae_path"]),
         device="cpu",
         torch_dtype=torch.bfloat16,
         module_source="diffusers",
         module_name="z_image_vae",
     )
-    mm.load_model(PPL_CONFIG["text_encoder_path"], device="cpu", torch_dtype=torch.bfloat16)
-    mm.load_from_huggingface(PPL_CONFIG["tokenizer_path"], "transformers", module_name="tokenizer")
-    mm.load_from_huggingface(PPL_CONFIG["scheduler_path"], "diffusers", module_name="scheduler")
+    mm.load_model(os.path.join(model_root, PPL_CONFIG["text_encoder_path"]), device="cpu", torch_dtype=torch.bfloat16)
+    mm.load_from_huggingface(
+        os.path.join(model_root, PPL_CONFIG["tokenizer_path"]), "transformers", module_name="tokenizer"
+    )
+    mm.load_from_huggingface(
+        os.path.join(model_root, PPL_CONFIG["scheduler_path"]), "diffusers", module_name="scheduler"
+    )
     pipeline = ZImagePipeline(device="cuda", torch_dtype=torch.bfloat16)
     pipe_config = ZImagePipelineConfig()
     pipe_config.dit_config.attention_config = AttentionConfig.dense_attention(PPL_CONFIG["attn_impl"])
@@ -80,14 +79,15 @@ def run(
 @click.command()
 @click.option("--aspect_ratio", "-ar", default="16:9", help="Image ratio such as 1:1, 16:9", type=str)
 @click.option("--gpu_num", default=1, help="Number of GPUs to use", type=int)
+@click.option("--model_root", default=PPL_CONFIG["model_root"], help="Number of GPUs to use", type=str)
 @click.option(
     "--prompt",
     default="Young Chinese woman in red Hanfu, intricate embroidery. Impeccable makeup, red floral forehead pattern. Elaborate high bun, golden phoenix headdress, red flowers, beads. Holds round folding fan with lady, trees, bird. Neon lightning-bolt lamp (⚡️), bright yellow glow, above extended left palm. Soft-lit outdoor night background, silhouetted tiered pagoda (西安大雁塔), blurred colorful distant lights.",
     help="Custom prompt text",
 )
 @click.option("--output", default=get_example_name(__file__, "png"), help="Output image filename")
-def main(aspect_ratio, gpu_num, prompt, output):
-    pipeline = get_pipeline(gpu_num)
+def main(aspect_ratio, gpu_num, prompt, output, model_root):
+    pipeline = get_pipeline(gpu_num, model_root)
     # Warm up
     images = run(pipeline, prompt, aspect_ratio)
     # Timing run

@@ -13,9 +13,10 @@ from telefuser.utils.audio import save_wav
 from telefuser.utils.utils import get_example_name
 from telefuser.utils.video import get_target_image_size, save_video
 
-DEFAULT_CONFIG = dict(
+TF_MODEL_ZOO_PATH = os.environ.get("TF_MODEL_ZOO_PATH", "model_zoo")
+PPL_CONFIG = dict(
     name="ltx23_22B_i2v_h100",
-    model_root="/nvfile-heatstorage/model_zoo/modelscope/LTX-2.3",
+    model_root=TF_MODEL_ZOO_PATH + "/LTX-2.3",
     negative_prompt="worst quality, low quality, blurry, distorted, deformed, artifacts, overexposed, underexposed",
     num_inference_steps=30,
     num_frames=121,
@@ -34,28 +35,34 @@ DEFAULT_CONFIG = dict(
     audio_rescale_scale=0.7,
     audio_modality_scale=3.0,
     sample_solver="euler",
-    attn_impl=AttnImplType.SAGE_ATTN_2_8_8_SM90,
+    attn_impl=AttnImplType.TORCH_SDPA,
     gemma_path_list=[
-        "/nvfile-heatstorage/model_zoo/modelscope/gemma-3-12b-it-qat-q4_0-unquantized/model-00001-of-00005.safetensors",
-        "/nvfile-heatstorage/model_zoo/modelscope/gemma-3-12b-it-qat-q4_0-unquantized/model-00002-of-00005.safetensors",
-        "/nvfile-heatstorage/model_zoo/modelscope/gemma-3-12b-it-qat-q4_0-unquantized/model-00003-of-00005.safetensors",
-        "/nvfile-heatstorage/model_zoo/modelscope/gemma-3-12b-it-qat-q4_0-unquantized/model-00004-of-00005.safetensors",
-        "/nvfile-heatstorage/model_zoo/modelscope/gemma-3-12b-it-qat-q4_0-unquantized/model-00005-of-00005.safetensors",
+        os.environ.get("TF_MODEL_ZOO_PATH", "/nvfile-heatstorage/model_zoo")
+        + "/modelscope/gemma-3-12b-it-qat-q4_0-unquantized/model-00001-of-00005.safetensors",
+        os.environ.get("TF_MODEL_ZOO_PATH", "/nvfile-heatstorage/model_zoo")
+        + "/modelscope/gemma-3-12b-it-qat-q4_0-unquantized/model-00002-of-00005.safetensors",
+        os.environ.get("TF_MODEL_ZOO_PATH", "/nvfile-heatstorage/model_zoo")
+        + "/modelscope/gemma-3-12b-it-qat-q4_0-unquantized/model-00003-of-00005.safetensors",
+        os.environ.get("TF_MODEL_ZOO_PATH", "/nvfile-heatstorage/model_zoo")
+        + "/modelscope/gemma-3-12b-it-qat-q4_0-unquantized/model-00004-of-00005.safetensors",
+        os.environ.get("TF_MODEL_ZOO_PATH", "/nvfile-heatstorage/model_zoo")
+        + "/modelscope/gemma-3-12b-it-qat-q4_0-unquantized/model-00005-of-00005.safetensors",
     ],
     lora_configs=[
         LoraConfig(
-            "/nvfile-heatstorage/model_zoo/modelscope/LTX-2.3/ltx-2.3-22b-distilled-lora-384.safetensors",
+            os.environ.get("TF_MODEL_ZOO_PATH", "/nvfile-heatstorage/model_zoo")
+            + "/modelscope/LTX-2.3/ltx-2.3-22b-distilled-lora-384.safetensors",
             1.0,
         )
     ],
 )
 
 
-def get_pipeline(model_root: str, parallelism: int = 2) -> LTX23VideoPipeline:
+def get_pipeline(parallelism: int = 2, model_root: str = PPL_CONFIG["model_root"]) -> LTX23VideoPipeline:
     """
     Args:
-        model_root: Root directory containing model files.
-        parallelism: Number of parallel GPUs for inference: 2, 4 or 8
+        parallelism: Number of parallel GPUs for inference (REQUIRED)
+        model_root: Root directory containing model files (REQUIRED)
     """
     # Load models
     module_manager = ModuleManager(device="cpu")
@@ -64,21 +71,21 @@ def get_pipeline(model_root: str, parallelism: int = 2) -> LTX23VideoPipeline:
     # upsampler
     module_manager.load_model(f"{model_root}/ltx-2.3-spatial-upscaler-x2-1.0.safetensors", torch_dtype=torch.bfloat16)
     # gemma encoder
-    module_manager.load_models([DEFAULT_CONFIG["gemma_path_list"]], torch_dtype=torch.bfloat16)
+    module_manager.load_models([PPL_CONFIG["gemma_path_list"]], torch_dtype=torch.bfloat16)
 
     pipe = LTX23VideoPipeline(device="cuda", torch_dtype=torch.bfloat16)
     pipe_config = LTXVideoPipelineConfig()
-    attention_config = AttentionConfig.dense_attention(DEFAULT_CONFIG["attn_impl"])
+    attention_config = AttentionConfig.dense_attention(PPL_CONFIG["attn_impl"])
     pipe_config.dit_stage1_config.attention_config = attention_config
     pipe_config.dit_stage2_config.attention_config = attention_config
 
     pipe_config.dit_stage1_config.offload_config.offload_type = WeightOffloadType.MODEL_CPU_OFFLOAD
     pipe_config.dit_stage2_config.offload_config.offload_type = WeightOffloadType.MODEL_CPU_OFFLOAD
-    pipe_config.dit_stage2_config.lora_configs = DEFAULT_CONFIG["lora_configs"]
+    pipe_config.dit_stage2_config.lora_configs = PPL_CONFIG["lora_configs"]
     pipe_config.vae_config.offload_config.offload_type = WeightOffloadType.MODEL_CPU_OFFLOAD
     pipe_config.upsampler_config.offload_config.offload_type = WeightOffloadType.MODEL_CPU_OFFLOAD
     pipe_config.text_encoding_config.offload_config.offload_type = WeightOffloadType.MODEL_CPU_OFFLOAD
-    pipe_config.sample_solver = DEFAULT_CONFIG["sample_solver"]
+    pipe_config.sample_solver = PPL_CONFIG["sample_solver"]
     if parallelism > 1:
         device_ids = list(range(parallelism))
         for dit_cfg in (pipe_config.dit_stage1_config, pipe_config.dit_stage2_config):
@@ -100,10 +107,10 @@ def run(
     image: Image.Image,
     prompt: str,
     negative_prompt: str = "",
-    seed: int = DEFAULT_CONFIG["seed"],
-    resolution: str = DEFAULT_CONFIG["resolution"],
-    num_inference_steps: int = DEFAULT_CONFIG["num_inference_steps"],
-    num_frames: int = DEFAULT_CONFIG["num_frames"],
+    seed: int = PPL_CONFIG["seed"],
+    resolution: str = PPL_CONFIG["resolution"],
+    num_inference_steps: int = PPL_CONFIG["num_inference_steps"],
+    num_frames: int = PPL_CONFIG["num_frames"],
 ):
     """
        Convert static images to video sequences (along with audio) using unified audio-video generation model.
@@ -133,24 +140,24 @@ def run(
     video, waveform, sample_rate = pipeline(
         prompt=prompt,
         input_image=image,
-        negative_prompt=f"{negative_prompt} {DEFAULT_CONFIG['negative_prompt']}".strip(),
+        negative_prompt=f"{negative_prompt} {PPL_CONFIG['negative_prompt']}".strip(),
         num_inference_steps=num_inference_steps,
         num_frames=num_frames,
         seed=seed,
-        tiled=DEFAULT_CONFIG["tiled"],
+        tiled=PPL_CONFIG["tiled"],
         height=int(height),
         width=int(width),
-        frame_rate=DEFAULT_CONFIG["frame_rate"],
-        input_image_frame_idx=DEFAULT_CONFIG["input_image_frame_idx"],
-        input_image_strength=DEFAULT_CONFIG["input_image_strength"],
-        video_cfg_scale=DEFAULT_CONFIG["video_cfg_scale"],
-        video_stg_scale=DEFAULT_CONFIG["video_stg_scale"],
-        video_rescale_scale=DEFAULT_CONFIG["video_rescale_scale"],
-        video_modality_scale=DEFAULT_CONFIG["video_modality_scale"],
-        audio_cfg_scale=DEFAULT_CONFIG["audio_cfg_scale"],
-        audio_stg_scale=DEFAULT_CONFIG["audio_stg_scale"],
-        audio_rescale_scale=DEFAULT_CONFIG["audio_rescale_scale"],
-        audio_modality_scale=DEFAULT_CONFIG["audio_modality_scale"],
+        frame_rate=PPL_CONFIG["frame_rate"],
+        input_image_frame_idx=PPL_CONFIG["input_image_frame_idx"],
+        input_image_strength=PPL_CONFIG["input_image_strength"],
+        video_cfg_scale=PPL_CONFIG["video_cfg_scale"],
+        video_stg_scale=PPL_CONFIG["video_stg_scale"],
+        video_rescale_scale=PPL_CONFIG["video_rescale_scale"],
+        video_modality_scale=PPL_CONFIG["video_modality_scale"],
+        audio_cfg_scale=PPL_CONFIG["audio_cfg_scale"],
+        audio_stg_scale=PPL_CONFIG["audio_stg_scale"],
+        audio_rescale_scale=PPL_CONFIG["audio_rescale_scale"],
+        audio_modality_scale=PPL_CONFIG["audio_modality_scale"],
     )
     return video, waveform, sample_rate
 
@@ -168,16 +175,16 @@ def run(
     help="Positive guidance text prompt",
 )
 @click.option("--negative_prompt", default="", help="Negative guidance prompt")
-@click.option("--model_root", default=DEFAULT_CONFIG["model_root"], help="Root directory containing model files")
+@click.option("--model_root", default=PPL_CONFIG["model_root"], help="Root directory containing model files")
 @click.option(
     "--resolution",
-    default=DEFAULT_CONFIG["resolution"],
+    default=PPL_CONFIG["resolution"],
     type=click.Choice(["720p", "1080p", "2k", "4k"], case_sensitive=False),
     help="Resolution preset",
 )
-@click.option("--num_inference_steps", default=DEFAULT_CONFIG["num_inference_steps"], help="Number of inference steps")
-@click.option("--num_frames", default=DEFAULT_CONFIG["num_frames"], help="Number of frames to generate")
-@click.option("--seed", default=DEFAULT_CONFIG["seed"], help="Random seed")
+@click.option("--num_inference_steps", default=PPL_CONFIG["num_inference_steps"], help="Number of inference steps")
+@click.option("--num_frames", default=PPL_CONFIG["num_frames"], help="Number of frames to generate")
+@click.option("--seed", default=PPL_CONFIG["seed"], help="Random seed")
 def main(  # noqa: PLR0913
     gpu_num: int,
     image_path: str,
@@ -190,7 +197,7 @@ def main(  # noqa: PLR0913
     seed: int,
 ) -> None:
     """Image to video conversion using LTX2.3 22B model with two-stage denoising"""
-    pipe = get_pipeline(model_root=model_root, parallelism=gpu_num)
+    pipe = get_pipeline(parallelism=gpu_num, model_root=model_root)
     image = Image.open(image_path).convert("RGB")
 
     start = time.time()
@@ -217,7 +224,7 @@ def main(  # noqa: PLR0913
     temp_audio_file.close()
     try:
         save_wav(waveform, sample_rate, temp_audio_path)
-        save_video(video, output_path, fps=float(DEFAULT_CONFIG["frame_rate"]), quality=6, audio_path=temp_audio_path)
+        save_video(video, output_path, fps=float(PPL_CONFIG["frame_rate"]), quality=6, audio_path=temp_audio_path)
     finally:
         try:
             os.remove(temp_audio_path)

@@ -329,6 +329,25 @@ pipelines:
       attn_impl: FLASH_ATTN_2
 ```
 
+### 环境变量
+
+运行回归测试前，需设置 `TF_MODEL_ZOO_PATH` 环境变量指定模型仓库根目录：
+
+```bash
+# 设置模型仓库路径
+export TF_MODEL_ZOO_PATH=/path/to/model_zoo
+
+# 运行回归测试
+python examples/run_examples.py --all
+```
+
+示例脚本使用此环境变量定位模型文件：
+- `vae_path`: `TF_MODEL_ZOO_PATH/Wan2.1-T2V-1.3B/Wan2.1_VAE.pth`
+- `model_root`: `TF_MODEL_ZOO_PATH/LongCat-Video`（LongCat 示例）
+- `vfi_model_path`: `TF_MODEL_ZOO_PATH/RIFEv4.26_0921/flownet.pkl`
+
+未设置时默认值为 `"model_zoo"`（相对于工作目录）。
+
 ### Pipeline 配置字段
 
 | 字段 | 类型 | 默认值 | 描述 |

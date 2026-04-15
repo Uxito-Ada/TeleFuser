@@ -4,8 +4,9 @@ import torch
 from PIL import Image
 from diffusers import QwenImageEditPlusPipeline
 
+TF_MODEL_ZOO_PATH = os.environ.get("TF_MODEL_ZOO_PATH", "model_zoo")
 pipeline = QwenImageEditPlusPipeline.from_pretrained(
-    "/nvfile-heatstorage/model_zoo/huggingface/Qwen-Image-Edit-2509", torch_dtype=torch.bfloat16
+    os.path.join(TF_MODEL_ZOO_PATH, "Qwen-Image-Edit-2509"), torch_dtype=torch.bfloat16
 )
 print("pipeline loaded")
 pipeline.to("cuda")

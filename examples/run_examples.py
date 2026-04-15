@@ -285,10 +285,6 @@ class GPUPool:
         """Return number of available GPUs."""
         return len(self.available)
 
-    def total_count(self) -> int:
-        """Return total GPU count (available + allocated)."""
-        return len(self.available) + sum(len(v) for v in self.allocated.values())
-
 
 # =============================================================================
 # Pipeline Scheduler
@@ -687,6 +683,7 @@ class PipelineConfig:
     resolution: str | None = None
     aspect_ratio: str | None = None
     input_image_path: str | None = None
+    input_audio_path: str | None = None  # Audio input for LiveAct
     first_image_path: str | None = None
     last_image_path: str | None = None
     input_video_path: str | None = None
@@ -884,6 +881,8 @@ def _call_run(module: ModuleType, pipeline: object, config: dict) -> object:
         from PIL import Image
 
         kwargs["image"] = Image.open(config["input_image_path"]).convert("RGB")
+    if "audio_path" in params:
+        kwargs["audio_path"] = config.get("input_audio_path")
 
     # First/Last image input (for FL2V pipelines)
     if "first_image" in params:
@@ -1061,6 +1060,7 @@ def _run_single(pipeline_key: str, config_path: str | None, output_dir: str | No
         "resolution": ppl_cfg.resolution,
         "aspect_ratio": ppl_cfg.aspect_ratio,
         "input_image_path": ppl_cfg.input_image_path,
+        "input_audio_path": ppl_cfg.input_audio_path,
         "first_image_path": ppl_cfg.first_image_path,
         "last_image_path": ppl_cfg.last_image_path,
         "input_video_path": ppl_cfg.input_video_path,

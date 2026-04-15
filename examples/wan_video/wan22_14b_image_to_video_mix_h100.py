@@ -5,7 +5,7 @@ import click
 import torch
 from PIL import Image
 
-from telefuser.core.config import AttentionConfig, AttnImplType, FeatureCacheConfig, LoraConfig, WeightOffloadType
+from telefuser.core.config import AttentionConfig, AttnImplType, FeatureCacheConfig, WeightOffloadType
 from telefuser.core.module_manager import ModuleManager
 from telefuser.pipelines.wan_video.wan22_video import (
     Wan22VideoPipeline,
@@ -14,9 +14,10 @@ from telefuser.pipelines.wan_video.wan22_video import (
 from telefuser.utils.utils import get_example_name
 from telefuser.utils.video import get_target_image_size, save_video
 
+TF_MODEL_ZOO_PATH = os.environ.get("TF_MODEL_ZOO_PATH", "model_zoo")
 PPL_CONFIG = dict(
     name="wan22_A14B_mix_i2v_h100",
-    model_root="/nvfile-heatstorage/model_zoo/modelscope/Wan2.2-I2V-A14B",
+    model_root=TF_MODEL_ZOO_PATH + "/Wan2.2-I2V-A14B",
     negative_prompt="Overly saturated colors, overexposed, static, blurry details, subtitles, style, artwork, painting, frame, still, overall grayish, worst quality, low quality, JPEG compression artifacts, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn face, deformed, disfigured, malformed limbs, fused fingers, static frames, cluttered background, three legs, crowded background, walking backwards",
     num_inference_steps=(40, 4),
     num_frames=81,
@@ -29,21 +30,11 @@ PPL_CONFIG = dict(
     boundary=0.9,
     sample_solver="mix-euler",
     attn_impl=AttnImplType.TORCH_SDPA,
-    dit_high_path_list=[
-        "dit_high_noise_model_bfloat16_5d6fd.safetensors",
-    ],
-    dit_low_path_list=[
-        "dit_low_noise_model_bfloat16_c55d6.safetensors",
-    ],
+    dit_high_path_list="high_noise_model/diffusion_pytorch_model-0000*-of-00006.safetensors",
+    dit_low_path=TF_MODEL_ZOO_PATH + "/Wan2.2-Distill-Models/wan2.2_i2v_A14b_low_noise_lightx2v_4step.safetensors",
     enable_feature_cache_dit_high=True,
     enable_feature_cache_dit_low=False,
     model_type="Wan2_2-I2V-A14B",
-    dit_low_lora_configs=[
-        LoraConfig(
-            "/nvfile-heatstorage/model_zoo/release/video/wan_cfg_step_distill/wan2.2_i2v_A14b_low_noise_lora_rank64_lightx2v_4step_1022.safetensors",
-            1.0,
-        )
-    ],
 )
 
 
@@ -64,12 +55,12 @@ def get_pipeline(parallelism=1, model_root=PPL_CONFIG["model_root"]):
     )
     # dit high
     module_manager.load_model(
-        [os.path.join(model_root, filename) for filename in ppl_config["dit_high_path_list"]],
+        os.path.join(model_root, PPL_CONFIG["dit_high_path_list"]),
         torch_dtype=torch.bfloat16,
     )
     # dit low
     module_manager.load_model(
-        [os.path.join(model_root, filename) for filename in ppl_config["dit_low_path_list"]],
+        os.path.join(model_root, PPL_CONFIG["dit_low_path"]),
         torch_dtype=torch.bfloat16,
     )
 
@@ -87,7 +78,6 @@ def get_pipeline(parallelism=1, model_root=PPL_CONFIG["model_root"]):
     pipe_config.dit_low_config.attention_config = AttentionConfig.dense_attention(ppl_config["attn_impl"])
     pipe_config.sample_solver = ppl_config["sample_solver"]
     pipe_config.dit_low_config.offload_config.offload_type = WeightOffloadType.MODEL_CPU_OFFLOAD
-    pipe_config.dit_low_config.lora_configs = ppl_config["dit_low_lora_configs"]
     # Configure feature cache
     if ppl_config.get("enable_feature_cache_dit_high", False):
         pipe_config.dit_high_config.feature_cache_config = FeatureCacheConfig(
@@ -176,7 +166,7 @@ def run(
 @click.option("--resolution", default=PPL_CONFIG["resolution"], help="480p or 720p")
 @click.option(
     "--model_root",
-    default="/nvfile-heatstorage/model_zoo/modelscope/Wan2.2-I2V-A14B",
+    default=PPL_CONFIG["model_root"],
     help="Root directory of the model files",
 )
 def main(

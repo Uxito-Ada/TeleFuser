@@ -14,9 +14,10 @@ from telefuser.pipelines.longcat_video import (
 from telefuser.utils.utils import get_example_name
 from telefuser.utils.video import get_target_video_size_from_ratio, save_video
 
+TF_MODEL_ZOO_PATH = os.environ.get("TF_MODEL_ZOO_PATH", "model_zoo")
 PPL_CONFIG = dict(
     name="longcat_t2v",
-    model_root="/nvfile-heatstorage/model_zoo/modelscope/LongCat-Video",
+    model_root=TF_MODEL_ZOO_PATH + "/LongCat-Video",
     negative_prompt="色调艳丽,过曝,静态,细节模糊不清,字幕,风格,作品,画作,画面,静止,整体发灰,最差质量,低质量,JPEG压缩残留,丑陋的,残缺的,多余的手指,画得不好的手部,画得不好的脸部,畸形的,毁容的,形态畸形的肢体,手指融合,静止不动的画面,杂乱的背景,三条腿,背景人很多,倒着走",
     num_inference_steps=50,
     num_frames=93,
@@ -26,46 +27,48 @@ PPL_CONFIG = dict(
     tiled=False,
     target_fps=15,
     attn_impl=AttnImplType.TORCH_SDPA,
-    tokenizer_path="/nvfile-heatstorage/model_zoo/huggingface/LongCat-Video/tokenizer",
-    text_encoder_path="/nvfile-heatstorage/model_zoo/huggingface/LongCat-Video/text_encoder",
-    dit_path_list=[
-        "/nvfile-heatstorage/model_zoo/modelscope/LongCat-Video/dit/diffusion_pytorch_model-00001-of-00006.safetensors",
-        "/nvfile-heatstorage/model_zoo/modelscope/LongCat-Video/dit/diffusion_pytorch_model-00002-of-00006.safetensors",
-        "/nvfile-heatstorage/model_zoo/modelscope/LongCat-Video/dit/diffusion_pytorch_model-00003-of-00006.safetensors",
-        "/nvfile-heatstorage/model_zoo/modelscope/LongCat-Video/dit/diffusion_pytorch_model-00004-of-00006.safetensors",
-        "/nvfile-heatstorage/model_zoo/modelscope/LongCat-Video/dit/diffusion_pytorch_model-00005-of-00006.safetensors",
-        "/nvfile-heatstorage/model_zoo/modelscope/LongCat-Video/dit/diffusion_pytorch_model-00006-of-00006.safetensors",
+    dit_filename_list=[
+        "dit/diffusion_pytorch_model-00001-of-00006.safetensors",
+        "dit/diffusion_pytorch_model-00002-of-00006.safetensors",
+        "dit/diffusion_pytorch_model-00003-of-00006.safetensors",
+        "dit/diffusion_pytorch_model-00004-of-00006.safetensors",
+        "dit/diffusion_pytorch_model-00005-of-00006.safetensors",
+        "dit/diffusion_pytorch_model-00006-of-00006.safetensors",
     ],
-    vae_path="/nvfile-heatstorage/model_zoo/modelscope/Wan2___1-T2V-14B/Wan2.1_VAE.pth",
+    vae_path=os.path.join(TF_MODEL_ZOO_PATH, "Wan2.1-T2V-1.3B/Wan2.1_VAE.pth"),
 )
 
 
-def get_pipeline(parallelism=1):
+def get_pipeline(parallelism=1, model_root=PPL_CONFIG["model_root"]):
     """
     Args:
-        parallelism (int): Number of parallel GPUs for inference: 1, 2, 4 or 8
+        parallelism (int): Number of parallel GPUs for inference (REQUIRED)
+        model_root (str): Root directory of model weights (REQUIRED)
     """
+    # Build absolute paths from model_root
+    dit_paths = [os.path.join(model_root, f) for f in PPL_CONFIG["dit_filename_list"]]
+
     # Load models
     module_manager = ModuleManager(device="cpu")
 
-    module_manager.load_models(
-        [PPL_CONFIG["vae_path"]],
+    module_manager.load_model(
+        PPL_CONFIG["vae_path"],
         torch_dtype=torch.bfloat16,
     )
 
-    module_manager.load_models(
-        [PPL_CONFIG["dit_path_list"]],
+    module_manager.load_model(
+        dit_paths,
         torch_dtype=torch.bfloat16,
     )
 
     module_manager.load_from_huggingface(
-        PPL_CONFIG["tokenizer_path"],
+        os.path.join(model_root, "tokenizer"),
         module_source="transformers",
         module_name="longcat_tokenizer",
     )
 
     module_manager.load_from_huggingface(
-        PPL_CONFIG["text_encoder_path"],
+        os.path.join(model_root, "text_encoder"),
         module_source="transformers",
         module_name="longcat_text_encoder",
         module_class=UMT5EncoderModel,
@@ -166,9 +169,10 @@ def run_with_file(
 @click.option("--resolution", default="720p", help="480p or 720p")
 @click.option("--aspect_ratio", default="16:9", help="Aspect ratio: 16:9, 9:16, 1:1, etc.")
 @click.option("--seed", default=PPL_CONFIG["seed"], help="Random seed")
-def main(gpu_num, prompt, negative_prompt, resolution, aspect_ratio, seed):
+@click.option("--model_root", default=PPL_CONFIG["model_root"], help="Model root directory")
+def main(gpu_num, prompt, negative_prompt, resolution, aspect_ratio, seed, model_root):
     """Text to video conversion using LongCat Video model"""
-    pipe = get_pipeline(gpu_num)
+    pipe = get_pipeline(gpu_num, model_root)
     width, height = get_target_video_size_from_ratio(aspect_ratio, resolution)
 
     # Run inference

@@ -1,5 +1,6 @@
 """Wan2.2 I2V (Image-to-Video) 5B example.
 
+
 Usage:
     python wan22_i2v_5b.py --prompt "A cat playing piano" --image_path cat.jpg
 """
@@ -20,9 +21,10 @@ from telefuser.pipelines.wan_video.wan22_ti2v import (
 from telefuser.utils.utils import get_example_name
 from telefuser.utils.video import get_target_image_size, save_video
 
+TF_MODEL_ZOO_PATH = os.environ.get("TF_MODEL_ZOO_PATH", "model_zoo")
 PPL_CONFIG = dict(
     name="wan22_i2v_5b",
-    model_root="/nvfile-heatstorage/model_zoo/modelscope/Wan2.2-TI2V-5B",
+    model_root=TF_MODEL_ZOO_PATH + "/Wan2.2-TI2V-5B",
     negative_prompt="色调艳丽，过曝，静态，细节模糊不清，字幕，风格，作品，画作，画面，静止，整体发灰，最差质量，低质量，JPEG压缩残留，丑陋的，残缺的，多余的手指，画得不好的手部，画得不好的脸部，畸形的，毁容的，形态畸形的肢体，手指融合，静止不动的画面，杂乱的背景，三条腿，背景人很多，倒着走",
     num_inference_steps=50,
     num_frames=121,
@@ -123,7 +125,7 @@ def get_pipeline(parallelism: int = 1, model_root: str = PPL_CONFIG["model_root"
 @click.option("--num_frames", default=121, help="Number of frames (should be 4n+1)")
 @click.option(
     "--model_root",
-    default="/nvfile-heatstorage/model_zoo/modelscope/Wan2.2-TI2V-5B",
+    default=PPL_CONFIG["model_root"],
     help="Root directory of the model files",
 )
 def main(

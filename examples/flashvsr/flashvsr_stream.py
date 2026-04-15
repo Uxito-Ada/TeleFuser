@@ -1,5 +1,6 @@
 """FlashVSR Streaming Video Super-Resolution Example.
 
+
 This example demonstrates streaming video super-resolution using FlashVSR model.
 Supports chunk-based processing for memory-efficient inference on long videos.
 
@@ -10,7 +11,7 @@ Model Source:
 Usage:
     python examples/flashvsr/flashvsr_stream.py \
         --input_video examples/data/dag.mp4 \
-        --scale  \
+        --scale 2.25 \
         --gpu_num 1 \
         --model_root /path/to/FlashVSR-v1.1
 """
@@ -29,13 +30,23 @@ from telefuser.pipelines.flashvsr.flashvsr_stream import (
 from telefuser.utils.utils import get_example_name
 from telefuser.utils.video import VideoData, save_video
 
-# Model filenames in the model_root directory
-DIT_FILENAME = "flashvsr11_dit_streaming_dmd_5dc619.safetensors"
-VAE_FILENAME = "TCDecoder.ckpt"
-
-
-FIRST_CHUNK_SIZE = 25
-CHUNK_SIZE = 16
+TF_MODEL_ZOO_PATH = os.environ.get("TF_MODEL_ZOO_PATH", "model_zoo")
+PPL_CONFIG = dict(
+    name="flashvsr_stream",
+    model_root=TF_MODEL_ZOO_PATH + "/FlashVSR-v1.1-BF16",
+    dit_filename="flashvsr11_dit_streaming_dmd_5dc619.safetensors",
+    vae_filename="TCDecoder.ckpt",
+    scale=2.25,  # 480p -> 1080p
+    seed=0,
+    sparse_ratio=2,
+    kv_ratio=3,
+    local_range=11,
+    proj_tile=False,
+    fps=16,
+    video_quality=6,
+    first_chunk_size=25,
+    chunk_size=16,
+)
 
 
 def get_chunk_indices(frame_count: int) -> list[tuple[int, int]]:
@@ -47,25 +58,29 @@ def get_chunk_indices(frame_count: int) -> list[tuple[int, int]]:
     Returns:
         List of (start, end) index tuples for each chunk
     """
-    indices = [(0, min(FIRST_CHUNK_SIZE, frame_count))]
-    offset = FIRST_CHUNK_SIZE
+    first_chunk_size = PPL_CONFIG["first_chunk_size"]
+    chunk_size = PPL_CONFIG["chunk_size"]
+    indices = [(0, min(first_chunk_size, frame_count))]
+    offset = first_chunk_size
     while offset < frame_count:
-        indices.append((offset, min(offset + CHUNK_SIZE, frame_count)))
-        offset += CHUNK_SIZE
+        indices.append((offset, min(offset + chunk_size, frame_count)))
+        offset += chunk_size
     return indices
 
 
-def get_pipeline(dit_path: str, vae_path: str, parallelism: int = 1):
+def get_pipeline(parallelism: int = 1, model_root: str = PPL_CONFIG["model_root"]) -> FlashVSRStreamVideoPipeline:
     """Initialize the FlashVSR streaming pipeline.
 
     Args:
-        dit_path: Path to DiT model file
-        vae_path: Path to VAE model file
         parallelism: Number of GPUs for parallel inference
+        model_root: Root directory containing model files
 
     Returns:
         Initialized FlashVSRStreamVideoPipeline
     """
+    dit_path = os.path.join(model_root, PPL_CONFIG["dit_filename"])
+    vae_path = os.path.join(model_root, PPL_CONFIG["vae_filename"])
+
     mm = ModuleManager(torch_dtype=torch.bfloat16, device="cpu")
     mm.load_models([dit_path])
     mm.load_models([vae_path])
@@ -83,7 +98,12 @@ def get_pipeline(dit_path: str, vae_path: str, parallelism: int = 1):
     return pipe
 
 
-def run(pipeline: FlashVSRStreamVideoPipeline, input_video, scale: int, seed: int = 0):
+def run(
+    pipeline: FlashVSRStreamVideoPipeline,
+    input_video,
+    scale: float = PPL_CONFIG["scale"],
+    seed: int = PPL_CONFIG["seed"],
+):
     """Run video super-resolution on a video chunk.
 
     Args:
@@ -100,27 +120,34 @@ def run(pipeline: FlashVSRStreamVideoPipeline, input_video, scale: int, seed: in
         LQ_video=input_video,
         scale=scale,
         rand_device="cpu",
-        sparse_ratio=2,
-        kv_ratio=3,
-        local_range=11,
-        proj_tile=False,
+        sparse_ratio=PPL_CONFIG["sparse_ratio"],
+        kv_ratio=PPL_CONFIG["kv_ratio"],
+        local_range=PPL_CONFIG["local_range"],
+        proj_tile=PPL_CONFIG["proj_tile"],
     )
     return video
 
 
 @click.command()
-@click.option("--input_video", "-i", required=True, help="Path to input low-quality video")
-@click.option("--scale", "-s", default=2.25, type=float, help="Upscaling factor (default: 2.25, 480p->1080p)")
+@click.option(
+    "--input_video",
+    "-i",
+    default=f"{os.path.dirname(__file__)}/../data/dag.mp4",
+    help="Path to input low-quality video",
+)
+@click.option(
+    "--scale", "-s", default=PPL_CONFIG["scale"], type=float, help="Upscaling factor (default: 2.25, 480p->1080p)"
+)
 @click.option("--height", "-h", default=None, type=int, help="Input video height (default: auto-detect)")
 @click.option("--width", "-w", default=None, type=int, help="Input video width (default: auto-detect)")
 @click.option("--gpu_num", default=1, type=int, help="Number of GPUs to use (default: 1)")
 @click.option(
     "--model_root",
-    default="/dev/shm/zuoxin/flashvsr",
-    help="Root directory containing model files (default: /dev/shm/zuoxin/flashvsr)",
+    default=PPL_CONFIG["model_root"],
+    help=f"Root directory containing model files (default: {PPL_CONFIG['model_root']})",
 )
 @click.option("--output", "-o", default=None, help="Output video path (default: auto-generated)")
-@click.option("--seed", default=0, type=int, help="Random seed (default: 0)")
+@click.option("--seed", default=PPL_CONFIG["seed"], type=int, help=f"Random seed (default: {PPL_CONFIG['seed']})")
 def main(
     input_video: str,
     scale: float,
@@ -128,7 +155,7 @@ def main(
     width: int | None,
     gpu_num: int,
     model_root: str,
-    output: str,
+    output: str | None,
     seed: int,
 ):
     """FlashVSR Streaming Video Super-Resolution.
@@ -151,9 +178,6 @@ def main(
     if not os.path.exists(input_video):
         raise FileNotFoundError(f"Input video not found: {input_video}")
 
-    dit_path = os.path.join(model_root, DIT_FILENAME)
-    vae_path = os.path.join(model_root, VAE_FILENAME)
-
     if output is None:
         output_dir = os.getenv("TELEAI_EXAMPLE_OUTPUT_DIR", "./")
         filename = get_example_name(__file__).replace(".mp4", f"_scale{scale}_{gpu_num}gpu.mp4")
@@ -167,7 +191,7 @@ def main(
     click.echo(f"Output: {output}")
 
     click.echo("Loading pipeline...")
-    pipeline = get_pipeline(dit_path, vae_path, gpu_num)
+    pipeline = get_pipeline(gpu_num, model_root)
 
     click.echo("Loading video...")
     LQ_video = VideoData(video_file=input_video, height=height, width=width).raw_data()
@@ -195,7 +219,7 @@ def main(
     click.echo(f"Processing time: {elapsed_time:.2f} seconds")
 
     click.echo(f"Saving to {output}...")
-    save_video(final_video, output, fps=16, quality=6)
+    save_video(final_video, output, fps=PPL_CONFIG["fps"], quality=PPL_CONFIG["video_quality"])
     click.echo("Done!")
 
     pipeline.clean_cache()

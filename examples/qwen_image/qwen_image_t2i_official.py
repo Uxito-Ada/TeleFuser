@@ -1,9 +1,14 @@
+import os
+
 import torch
 from diffusers import QwenImagePipeline
 
 from telefuser.utils.utils import get_example_name
 
 # Load the pipeline
+
+TF_MODEL_ZOO_PATH = os.environ.get("TF_MODEL_ZOO_PATH", "model_zoo")
+
 if torch.cuda.is_available():
     torch_dtype = torch.bfloat16
     device = "cuda"
@@ -12,7 +17,7 @@ else:
     device = "cpu"
 
 pipe = QwenImagePipeline.from_pretrained(
-    "/nvfile-heatstorage/model_zoo/huggingface/Qwen-Image-2512/", torch_dtype=torch_dtype
+    os.path.join(TF_MODEL_ZOO_PATH, "Qwen-Image-2512"), torch_dtype=torch_dtype
 ).to(device)
 
 # Generate image

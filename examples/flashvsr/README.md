@@ -24,6 +24,19 @@ Video Super-Resolution using FlashVSR model with streaming inference support.
 | Distilled Model | N/A |
 | Server API | N/A |
 
+## Start
+
+1. install block sparse attention
+````bash
+git clone https://github.com/mit-han-lab/Block-Sparse-Attention.git
+cd Block-Sparse-Attention
+pip install packaging
+pip install ninja
+python setup.py install
+
+````
+2. install tf-kernel refer to tf-kernel sub-folder
+
 ## Model Files
 
 The model root directory should contain:

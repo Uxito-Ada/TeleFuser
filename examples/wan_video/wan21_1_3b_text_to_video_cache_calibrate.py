@@ -1,4 +1,5 @@
 """
+
 Cache Calibrator Example for Wan2.1 1.3B Text-to-Video
 
 This script runs the pipeline once to collect calibration data
@@ -39,8 +40,12 @@ from telefuser.utils.utils import get_example_name
 from telefuser.utils.video import get_target_video_size_from_ratio, save_video
 
 # Default configuration
+
+TF_MODEL_ZOO_PATH = os.environ.get("TF_MODEL_ZOO_PATH", "model_zoo")
+
 PPL_CONFIG = dict(
     name="wan21_1.3B_t2v_cache_calibrate",
+    model_root=TF_MODEL_ZOO_PATH + "/Wan2.1-T2V-1.3B",
     negative_prompt="Camera shake, overly saturated colors, overexposed, static, blurry details, subtitles, style, artwork, painting, frame, still, overall grayish, worst quality, low quality, JPEG compression artifacts, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn face, deformed, disfigured, malformed limbs, fused fingers, static frames, cluttered background, three legs, crowded background, walking backwards",
     num_inference_steps=50,
     num_frames=81,
@@ -55,13 +60,13 @@ PPL_CONFIG = dict(
 )
 
 
-def get_pipeline(parallelism: int = 1, model_root: str = "/dev/shm/Wan2.1-T2V-1.3B/"):
+def get_pipeline(parallelism: int = 1, model_root: str = PPL_CONFIG["model_root"]):
     """
     Create and initialize the video generation pipeline.
 
     Args:
-        parallelism: Number of parallel GPUs for inference: 2, 4 or 8
-        model_root: Root directory of the model files
+        parallelism: Number of parallel GPUs for inference (REQUIRED)
+        model_root: Root directory of the model files (REQUIRED)
     """
     module_manager = ModuleManager(device="cpu")
     module_manager.load_models(
@@ -177,7 +182,7 @@ def run_calibration(
 @click.option("--seed", default=42, help="Random seed")
 @click.option("--resolution", default=PPL_CONFIG["resolution"], help="Resolution (480p, 720p)")
 @click.option("--aspect_ratio", default="16:9", help="Aspect ratio")
-@click.option("--model_root", default="/dev/shm/Wan2.1-T2V-1.3B/", help="Root directory of the model files")
+@click.option("--model_root", default=PPL_CONFIG["model_root"], help="Root directory of the model files")
 @click.option("--model_name", default="Wan2.1-T2V-1.3B", help="Model name for the output file")
 @click.option("--output_path", default=None, help="Output path for the JSON file (default: params directory)")
 def main(

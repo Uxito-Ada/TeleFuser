@@ -1,5 +1,6 @@
 """Flux2 Klein text-to-image generation example.
 
+
 Usage:
     python examples/flux2_klein/flux2_klein_text_to_image_h100.py --prompt "A cat holding a sign"
 
@@ -25,13 +26,14 @@ from telefuser.utils.utils import get_example_name
 # Configuration
 # =============================================================================
 
+TF_MODEL_ZOO_PATH = os.environ.get("TF_MODEL_ZOO_PATH", "model_zoo")
 PPL_CONFIG = dict(
     name="flux2_klein_t2i_h100",
+    model_root=TF_MODEL_ZOO_PATH + "/FLUX.2-klein-9B",  # HF model ID or local path
     num_inference_steps=4,
     cfg_scale=1.0,
     sample_solver="euler",
     attn_impl=AttnImplType.TORCH_SDPA,
-    model_id="black-forest-labs/FLUX.2-klein-base-9B",
 )
 
 
@@ -42,8 +44,14 @@ PPL_CONFIG = dict(
 
 def get_pipeline(
     parallelism: int = 1,
-    model_root: str | None = None,
+    model_root: str = PPL_CONFIG["model_root"],
 ):
+    """Load Flux2 Klein pipeline.
+
+    Args:
+        parallelism: Number of parallel GPUs (REQUIRED)
+        model_root: HF model ID or local path (REQUIRED)
+    """
     logger.info(f"Loading Flux2 Klein pipeline from: {model_root}")
 
     # Construct paths to model components
@@ -160,8 +168,8 @@ def run(
 @click.option("--width", default=1024, help="Image width (divisible by 16)")
 @click.option(
     "--model_root",
-    default=None,
-    help="HuggingFace model ID or local path (default: black-forest-labs/FLUX.2-klein-base-9B)",
+    default=PPL_CONFIG["model_root"],
+    help="HuggingFace model ID or local path",
 )
 def main(
     gpu_num,

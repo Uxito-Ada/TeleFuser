@@ -1,4 +1,5 @@
 """
+
 Cache Calibrator Example for Wan2.2 14B Image-to-Video
 
 This script runs the pipeline once to collect calibration data
@@ -40,8 +41,12 @@ from telefuser.utils.utils import get_example_name
 from telefuser.utils.video import get_target_image_size, save_video
 
 # Default configuration
+
+TF_MODEL_ZOO_PATH = os.environ.get("TF_MODEL_ZOO_PATH", "model_zoo")
+
 PPL_CONFIG = dict(
     name="wan22_14B_i2v_cache_calibrate",
+    model_root=TF_MODEL_ZOO_PATH + "/Wan2.2-I2V-A14B",
     negative_prompt="Overly saturated colors, overexposed, static, blurry details, subtitles, style, artwork, painting, frame, still, overall grayish, worst quality, low quality, JPEG compression artifacts, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn face, deformed, disfigured, malformed limbs, fused fingers, static frames, cluttered background, three legs, crowded background, walking backwards",
     num_inference_steps=40,
     num_frames=81,
@@ -53,35 +58,33 @@ PPL_CONFIG = dict(
     target_fps=16,
     sample_solver="euler",
     attn_impl=AttnImplType.TORCH_SDPA,
-    dit_high_path_list=[
-        "dit_high_noise_model_bfloat16_5d6fd.safetensors",
-    ],
-    dit_low_path_list=[
-        "dit_low_noise_model_bfloat16_c55d6.safetensors",
-    ],
+    dit_high_path_list="high_noise_model/diffusion_pytorch_model-0000*-of-00006.safetensors",
+    dit_low_path_list="low_noise_model/diffusion_pytorch_model-0000*-of-00006.safetensors",
     model_type="Wan2_2-I2V-A14B",
 )
 
 
-def get_pipeline(parallelism: int = 1, model_root: str = "/nvfile-heatstorage/model_zoo/modelscope/Wan2.2-I2V-A14B"):
+def get_pipeline(parallelism: int = 1, model_root: str = PPL_CONFIG["model_root"]):
     """
     Create and initialize the video generation pipeline.
 
     Args:
-        parallelism: Number of parallel GPUs for inference
-        model_root: Root directory of the model files
+        parallelism: Number of parallel GPUs for inference (REQUIRED)
+        model_root: Root directory of the model files (REQUIRED)
     """
     module_manager = ModuleManager(device="cpu")
     module_manager.load_model(
         f"{model_root}/Wan2.1_VAE.pth",
         torch_dtype=torch.bfloat16,
     )
+    # dit high
     module_manager.load_model(
-        [os.path.join(model_root, filename) for filename in PPL_CONFIG["dit_high_path_list"]],
+        os.path.join(model_root, PPL_CONFIG["dit_high_path_list"]),
         torch_dtype=torch.bfloat16,
     )
+    # dit low
     module_manager.load_model(
-        [os.path.join(model_root, filename) for filename in PPL_CONFIG["dit_low_path_list"]],
+        os.path.join(model_root, PPL_CONFIG["dit_low_path_list"]),
         torch_dtype=torch.bfloat16,
     )
     module_manager.load_model(
@@ -208,7 +211,7 @@ def run_calibration(
 @click.option("--resolution", default=PPL_CONFIG["resolution"], help="Resolution (480p, 720p)")
 @click.option(
     "--model_root",
-    default="/nvfile-heatstorage/model_zoo/modelscope/Wan2.2-I2V-A14B",
+    default=PPL_CONFIG["model_root"],
     help="Root directory of the model files",
 )
 @click.option("--model_name", default="Wan2.2-I2V-A14B", help="Model name for the output file")

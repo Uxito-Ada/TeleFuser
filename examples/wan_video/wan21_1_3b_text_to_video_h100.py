@@ -14,8 +14,10 @@ from telefuser.utils.logging import logger
 from telefuser.utils.utils import get_example_name
 from telefuser.utils.video import get_target_video_size_from_ratio, save_video
 
+TF_MODEL_ZOO_PATH = os.environ.get("TF_MODEL_ZOO_PATH", "model_zoo")
 PPL_CONFIG = dict(
     name="wan21_1.3B_t2v_h100",
+    model_root=TF_MODEL_ZOO_PATH + "/Wan2.1-T2V-1.3B",
     negative_prompt="Camera shake, overly saturated colors, overexposed, static, blurry details, subtitles, style, artwork, painting, frame, still, overall grayish, worst quality, low quality, JPEG compression artifacts, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn face, deformed, disfigured, malformed limbs, fused fingers, static frames, cluttered background, three legs, crowded background, walking backwards",
     num_inference_steps=40,
     num_frames=81,
@@ -27,16 +29,16 @@ PPL_CONFIG = dict(
     attn_impl=AttnImplType.TORCH_SDPA,
     model_type="Wan2.1-I2V-1.3B-720P",
     sigma_shift=8.0,
-    enable_vfi=False,  # Enable video frame interpolation
-    vfi_model_path="/dev/shm/Wan2.1-T2V-1.3B/flownet.pkl",  # RIFE model path
+    enable_vfi=True,  # Enable video frame interpolation
+    vfi_model_path=TF_MODEL_ZOO_PATH + "/RIFEv4.26_0921/flownet.pkl",  # RIFE model path
 )
 
 
-def get_pipeline(parallelism=1, model_root="/dev/shm/Wan2.1-T2V-1.3B/"):
+def get_pipeline(parallelism=1, model_root=PPL_CONFIG["model_root"]):
     """
     Args:
-        parallelism (int): Number of parallel GPUs for inference: 2, 4 or 8
-        model_root (str): Root directory of the model files
+        parallelism (int): Number of parallel GPUs for inference (REQUIRED)
+        model_root (str): Root directory of the model files (REQUIRED)
     """
     # Load models
     module_manager = ModuleManager(device="cpu")
@@ -168,7 +170,7 @@ def run_with_file(
 @click.option("--seed", default=42, help="Random seed")
 @click.option("--resolution", default=PPL_CONFIG["resolution"], help="Resolution (480p, 720p)")
 @click.option("--aspect_ratio", default="16:9", help="Aspect ratio")
-@click.option("--model_root", default="/dev/shm/Wan2.1-T2V-1.3B/", help="Root directory of the model files")
+@click.option("--model_root", default=PPL_CONFIG["model_root"], help="Root directory of the model files")
 def main(
     gpu_num,
     prompt,

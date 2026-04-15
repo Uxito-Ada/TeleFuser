@@ -1,4 +1,5 @@
 import math
+import os
 import time
 
 import click
@@ -12,34 +13,14 @@ from telefuser.pipelines.qwen_image import (
 )
 from telefuser.pipelines.qwen_image.qwen_image import ASPECT_RATIO_TO_SIZE
 
+TF_MODEL_ZOO_PATH = os.environ.get("TF_MODEL_ZOO_PATH", "model_zoo")
 PPL_CONFIG = dict(
-    name="qwen_image_t2i",
-    dit_path=[
-        "/nvfile-heatstorage/model_zoo/huggingface/Qwen-Image-2512/transformer/diffusion_pytorch_model-00001-of-00009.safetensors",
-        "/nvfile-heatstorage/model_zoo/huggingface/Qwen-Image-2512/transformer/diffusion_pytorch_model-00002-of-00009.safetensors",
-        "/nvfile-heatstorage/model_zoo/huggingface/Qwen-Image-2512/transformer/diffusion_pytorch_model-00003-of-00009.safetensors",
-        "/nvfile-heatstorage/model_zoo/huggingface/Qwen-Image-2512/transformer/diffusion_pytorch_model-00004-of-00009.safetensors",
-        "/nvfile-heatstorage/model_zoo/huggingface/Qwen-Image-2512/transformer/diffusion_pytorch_model-00005-of-00009.safetensors",
-        "/nvfile-heatstorage/model_zoo/huggingface/Qwen-Image-2512/transformer/diffusion_pytorch_model-00006-of-00009.safetensors",
-        "/nvfile-heatstorage/model_zoo/huggingface/Qwen-Image-2512/transformer/diffusion_pytorch_model-00007-of-00009.safetensors",
-        "/nvfile-heatstorage/model_zoo/huggingface/Qwen-Image-2512/transformer/diffusion_pytorch_model-00008-of-00009.safetensors",
-        "/nvfile-heatstorage/model_zoo/huggingface/Qwen-Image-2512/transformer/diffusion_pytorch_model-00009-of-00009.safetensors",
-    ],
-    vae_path=[
-        "/nvfile-heatstorage/model_zoo/huggingface/Qwen-Image-2512/vae/diffusion_pytorch_model.safetensors",
-    ],
-    text_encoder_path=[
-        "/nvfile-heatstorage/model_zoo/huggingface/Qwen-Image-2512/text_encoder/model-00001-of-00004.safetensors",
-        "/nvfile-heatstorage/model_zoo/huggingface/Qwen-Image-2512/text_encoder/model-00002-of-00004.safetensors",
-        "/nvfile-heatstorage/model_zoo/huggingface/Qwen-Image-2512/text_encoder/model-00003-of-00004.safetensors",
-        "/nvfile-heatstorage/model_zoo/huggingface/Qwen-Image-2512/text_encoder/model-00004-of-00004.safetensors",
-    ],
-    lora_configs=[
-        LoraConfig(
-            "/nvfile-heatstorage/model_zoo/huggingface/Qwen-Image-2512-Lightning/Qwen-Image-2512-Lightning-8steps-V1.0-fp32.safetensors",
-            1,
-        )
-    ],
+    name="qwen_image_t2i_lora",
+    model_root=TF_MODEL_ZOO_PATH + "/Qwen-Image-2512",
+    lora_path=TF_MODEL_ZOO_PATH + "/Qwen-Image-2512-Lightning/Qwen-Image-2512-Lightning-8steps-V1.0-fp32.safetensors",
+    dit_path="transformer/diffusion_pytorch_model-0000*-of-00009.safetensors",
+    vae_path="vae/diffusion_pytorch_model.safetensors",
+    text_encoder_path="text_encoder/model-0000*-of-00004.safetensors",
     attn_impl=AttnImplType.TORCH_SDPA,
     seed=0,
     sample_solver="euler",
@@ -48,17 +29,31 @@ PPL_CONFIG = dict(
 )
 
 
-def get_pipeline(parallelism=1):
+def get_pipeline(parallelism=1, model_root=PPL_CONFIG["model_root"]):
+    """Load Qwen-Image pipeline with LoRA.
+
+    Args:
+        parallelism: Number of parallel GPUs (REQUIRED)
+        model_root: Root directory of model weights (REQUIRED)
+
+    Returns:
+        Initialized QwenImagePipeline
+    """
+    dit_path = os.path.join(model_root, PPL_CONFIG["dit_path"])
+    vae_path = os.path.join(model_root, PPL_CONFIG["vae_path"])
+    text_encoder_path = os.path.join(model_root, PPL_CONFIG["text_encoder_path"])
+    lora_configs = [LoraConfig(PPL_CONFIG["lora_path"], 1.0)]
+
     mm = ModuleManager(torch_dtype=torch.bfloat16, device="cpu")
-    mm.load_model(PPL_CONFIG["dit_path"], device="cpu", torch_dtype=torch.bfloat16)
-    mm.load_model(PPL_CONFIG["vae_path"], device="cpu", torch_dtype=torch.bfloat16)
-    mm.load_model(PPL_CONFIG["text_encoder_path"], device="cpu", torch_dtype=torch.bfloat16)
+    mm.load_model(dit_path, device="cpu", torch_dtype=torch.bfloat16)
+    mm.load_model(vae_path, device="cpu", torch_dtype=torch.bfloat16)
+    mm.load_model(text_encoder_path, device="cpu", torch_dtype=torch.bfloat16)
     pipeline = QwenImagePipeline(device="cuda", torch_dtype=torch.bfloat16)
     pipe_config = QwenImagePipelineConfig()
     pipe_config.dit_config.attention_config = AttentionConfig.dense_attention(PPL_CONFIG["attn_impl"])
     pipe_config.dit_config.offload_config.offload_type = WeightOffloadType.NO_CPU_OFFLOAD
     pipe_config.sample_solver = PPL_CONFIG["sample_solver"]
-    pipe_config.dit_config.lora_configs = PPL_CONFIG["lora_configs"]
+    pipe_config.dit_config.lora_configs = lora_configs
     if parallelism > 1:
         pipe_config.dit_config.parallel_config.device_ids = list(range(parallelism))
         pipe_config.dit_config.parallel_config.sp_ulysses_degree = parallelism
@@ -99,9 +94,10 @@ def run(
     help="Custom prompt text",
 )
 @click.option("--output", default="image.jpg", help="Output image filename")
-def main(aspect_ratio, gpu_num, prompt, output):
+@click.option("--model_root", default=PPL_CONFIG["model_root"], help="Model root directory")
+def main(aspect_ratio, gpu_num, prompt, output, model_root):
     negative_prompt = "低分辨率，低画质，肢体畸形，手指畸形，画面过饱和，蜡像感，人脸无细节，过度光滑，画面具有AI感。构图混乱。文字模糊，扭曲。"
-    pipeline = get_pipeline(gpu_num)
+    pipeline = get_pipeline(gpu_num, model_root)
 
     # Warm up
     images = run(pipeline, prompt, aspect_ratio, negative_prompt=negative_prompt)
