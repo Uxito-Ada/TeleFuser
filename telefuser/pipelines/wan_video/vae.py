@@ -40,9 +40,9 @@ class VAEStage(BaseStage):
 
         # Apply torch.compile to VAE encode/decode for better performance
         compile_config = model_runtime_config.compile_config
-        if compile_config.enabled:
+        if compile_config.enabled and model_runtime_config.parallel_config.world_size == 1:
             # Compile the unified decode method (used by all decode paths)
-            self.vae.decode = torch.compile(self.vae.decode)
+            self.vae.decode = torch.compile(self.vae.decode, **compile_config.get_compile_kwargs())
             logger.info("✓ torch.compile enabled for VAE decode")
 
     @ProfilingContext4Debug("vae encode image")
@@ -219,6 +219,12 @@ class VAEStage(BaseStage):
     def parallel_models(self):
         """Configure tensor parallelism for VAE."""
         self.vae.set_parallelism(self.model_runtime_config.parallel_config.world_size)
+        if self.model_runtime_config.compile_config.enabled:
+            # Compile the unified decode method (used by all decode paths)
+            self.vae.decode = torch.compile(
+                self.vae.decode, **self.model_runtime_config.compile_config.get_compile_kwargs()
+            )
+            logger.info("✓ torch.compile enabled for VAE decode")
 
     @with_model_offload(["vae"])
     @torch.inference_mode()

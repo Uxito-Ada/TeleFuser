@@ -606,7 +606,45 @@ class VideoVAE(nn.Module):
 
 
 class WanVideoVAE(BaseModel):
-    """Video VAE wrapper with tiled encoding/decoding support."""
+    """Video VAE wrapper with tiled encoding/decoding and 2D spatial parallel support."""
+
+    # Predefined optimal 2D grid configurations
+    # Format: (latent_h, latent_w, world_size) -> (grid_h, grid_w)
+    GRID_TABLE = {
+        # world_size = 2
+        (60, 104, 2): (1, 2),
+        (68, 120, 2): (1, 2),
+        (90, 160, 2): (1, 2),
+        (60, 60, 2): (1, 2),
+        (72, 72, 2): (1, 2),
+        (88, 88, 2): (1, 2),
+        (120, 120, 2): (1, 2),
+        (104, 60, 2): (2, 1),
+        (120, 68, 2): (2, 1),
+        (160, 90, 2): (2, 1),
+        # world_size = 4
+        (60, 104, 4): (2, 2),
+        (68, 120, 4): (2, 2),
+        (90, 160, 4): (2, 2),
+        (60, 60, 4): (2, 2),
+        (72, 72, 4): (2, 2),
+        (88, 88, 4): (2, 2),
+        (120, 120, 4): (2, 2),
+        (104, 60, 4): (2, 2),
+        (120, 68, 4): (2, 2),
+        (160, 90, 4): (2, 2),
+        # world_size = 8
+        (60, 104, 8): (2, 4),
+        (68, 120, 8): (2, 4),
+        (90, 160, 8): (2, 4),
+        (60, 60, 8): (2, 4),
+        (72, 72, 8): (2, 4),
+        (88, 88, 8): (2, 4),
+        (120, 120, 8): (2, 4),
+        (104, 60, 8): (4, 2),
+        (120, 68, 8): (4, 2),
+        (160, 90, 8): (4, 2),
+    }
 
     def __init__(
         self,
@@ -675,8 +713,414 @@ class WanVideoVAE(BaseModel):
         self._feat_cache = []
         self._feat_idx = [0]
 
+    def enable_channels_last_3d(self) -> int:
+        """Enable channels_last_3d memory format for Conv3d weights.
+
+        Must be called after load_state_dict, as weights need to be loaded first.
+
+        Returns:
+            Number of Conv3d layers converted.
+        """
+        return _convert_conv3d_to_channels_last_3d(self.model)
+
     def set_parallelism(self, parallelism: int):
         self.parallelism = parallelism
+
+    # ==================== 2D Spatial Parallel Methods ====================
+
+    def calculate_2d_grid(self, latent_h: int, latent_w: int, world_size: int) -> tuple[int, int]:
+        """Calculate optimal 2D grid for spatial splitting.
+
+        Args:
+            latent_h: Latent height
+            latent_w: Latent width
+            world_size: Number of GPUs
+
+        Returns:
+            (grid_h, grid_w): Number of splits along H and W dimensions
+        """
+        key = (latent_h, latent_w, world_size)
+        if key in self.GRID_TABLE:
+            return self.GRID_TABLE[key]
+
+        # Find optimal grid: minimize aspect ratio difference
+        best_h, best_w = 1, world_size
+        min_aspect_diff = float("inf")
+
+        for h in range(1, world_size + 1):
+            if world_size % h == 0:
+                w = world_size // h
+                # Check if divisible
+                if latent_h % h == 0 and latent_w % w == 0:
+                    aspect_diff = abs((latent_h / h) - (latent_w / w))
+                    if aspect_diff < min_aspect_diff:
+                        min_aspect_diff = aspect_diff
+                        best_h, best_w = h, w
+
+        return best_h, best_w
+
+    def _compute_padded_slice(
+        self,
+        rank: int,
+        world_size: int,
+        total_size: int,
+        chunk_size: int,
+        padding: int,
+    ) -> tuple[int, int]:
+        """Compute slice indices with proper padding for boundary consistency.
+
+        Args:
+            rank: Current rank in this dimension
+            world_size: Number of splits in this dimension
+            total_size: Total size of the dimension
+            chunk_size: Core chunk size (without padding)
+            padding: Padding size in input space
+
+        Returns:
+            (start, end): Slice indices with padding
+        """
+        if world_size == 1:
+            return 0, total_size
+
+        if rank == 0:
+            # First rank: padding only on the right
+            start = 0
+            end = chunk_size + 2 * padding
+        elif rank == world_size - 1:
+            # Last rank: padding only on the left
+            start = total_size - (chunk_size + 2 * padding)
+            end = total_size
+        else:
+            # Middle ranks: padding on both sides
+            start = rank * chunk_size - padding
+            end = (rank + 1) * chunk_size + padding
+
+        return start, end
+
+    def _remove_latent_padding(
+        self,
+        tensor: torch.Tensor,
+        rank_h: int,
+        rank_w: int,
+        world_size_h: int,
+        world_size_w: int,
+        chunk_h: int,
+        chunk_w: int,
+    ) -> torch.Tensor:
+        """Remove padding from latent tensor after encode/decode.
+
+        Uses LightX2V approach: directly keep the core chunk region
+        (chunk_h x chunk_w) instead of calculating padding to remove.
+
+        Args:
+            tensor: Latent tensor with padding [B, C, T, H, W]
+            rank_h: Rank in H dimension
+            rank_w: Rank in W dimension
+            world_size_h: Number of splits in H
+            world_size_w: Number of splits in W
+            chunk_h: Core chunk size in H dimension (latent space)
+            chunk_w: Core chunk size in W dimension (latent space)
+
+        Returns:
+            Tensor with padding removed, shape [B, C, T, chunk_h, chunk_w]
+        """
+        # Remove H padding - keep core chunk_h region
+        if world_size_h == 1:
+            h_start, h_end = 0, tensor.shape[3]
+        elif rank_h == 0:
+            h_start = 0
+            h_end = chunk_h
+        elif rank_h == world_size_h - 1:
+            h_start = tensor.shape[3] - chunk_h
+            h_end = tensor.shape[3]
+        else:
+            # Middle ranks: remove padding from both sides
+            padding = (tensor.shape[3] - chunk_h) // 2
+            h_start = padding
+            h_end = tensor.shape[3] - padding
+
+        # Remove W padding - keep core chunk_w region
+        if world_size_w == 1:
+            w_start, w_end = 0, tensor.shape[4]
+        elif rank_w == 0:
+            w_start = 0
+            w_end = chunk_w
+        elif rank_w == world_size_w - 1:
+            w_start = tensor.shape[4] - chunk_w
+            w_end = tensor.shape[4]
+        else:
+            # Middle ranks: remove padding from both sides
+            padding = (tensor.shape[4] - chunk_w) // 2
+            w_start = padding
+            w_end = tensor.shape[4] - padding
+
+        return tensor[:, :, :, h_start:h_end, w_start:w_end].contiguous()
+
+    def _reconstruct_2d(
+        self,
+        chunks: list[torch.Tensor],
+        world_size_h: int,
+        world_size_w: int,
+        dim: int,
+    ) -> torch.Tensor:
+        """Reconstruct full tensor from 2D gathered chunks.
+
+        Args:
+            chunks: List of chunk tensors from all_gather
+            world_size_h: Number of splits along H
+            world_size_w: Number of splits along W
+            dim: Dimension to concatenate along (3 for H, 4 for W)
+
+        Returns:
+            Reconstructed full tensor
+        """
+        rows = []
+        for h_idx in range(world_size_h):
+            cols = []
+            for w_idx in range(world_size_w):
+                chunk_idx = h_idx * world_size_w + w_idx
+                cols.append(chunks[chunk_idx])
+            # Concatenate along W dimension (dim 4)
+            rows.append(torch.cat(cols, dim=dim + 1))
+        # Concatenate along H dimension (dim 3)
+        return torch.cat(rows, dim=dim)
+
+    def encode_dist_2d(
+        self,
+        video: torch.Tensor,
+        world_size_h: int,
+        world_size_w: int,
+        cur_rank_h: int,
+        cur_rank_w: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """Encode video with true 2D spatial splitting.
+
+        Each GPU processes a fixed spatial region with proper padding for
+        boundary consistency. Uses single all_gather for communication.
+
+        Args:
+            video: Input video tensor [1, C, T, H, W]
+            world_size_h: Number of splits along H dimension
+            world_size_w: Number of splits along W dimension
+            cur_rank_h: Current rank's position in H grid
+            cur_rank_w: Current rank's position in W grid
+            device: Computation device
+
+        Returns:
+            Encoded latent tensor on CPU [C, T, H_latent, W_latent]
+        """
+        spatial_ratio = self.upsampling_factor  # 8
+        padding_latent = 1  # 1 latent pixel padding for encode
+
+        # Calculate chunk dimensions in latent space
+        latent_h = video.shape[3] // spatial_ratio
+        latent_w = video.shape[4] // spatial_ratio
+        chunk_h = latent_h // world_size_h
+        chunk_w = latent_w // world_size_w
+
+        # Convert to input space
+        chunk_h_input = chunk_h * spatial_ratio
+        chunk_w_input = chunk_w * spatial_ratio
+        padding_input = padding_latent * spatial_ratio  # 8 pixels
+
+        # Compute slices with padding in input space
+        h_start, h_end = self._compute_padded_slice(
+            cur_rank_h, world_size_h, video.shape[3], chunk_h_input, padding_input
+        )
+        w_start, w_end = self._compute_padded_slice(
+            cur_rank_w, world_size_w, video.shape[4], chunk_w_input, padding_input
+        )
+
+        # Extract video chunk
+        video_chunk = video[:, :, :, h_start:h_end, w_start:w_end].contiguous()
+        video_chunk = video_chunk.to(device)
+
+        # Encode the chunk
+        encoded_chunk = self.model.encode(video_chunk, self.scale)
+
+        # Remove padding from encoded result
+        encoded_chunk = self._remove_latent_padding(
+            encoded_chunk, cur_rank_h, cur_rank_w, world_size_h, world_size_w, chunk_h, chunk_w
+        )
+
+        # Gather all chunks
+        world_size_total = world_size_h * world_size_w
+        full_encoded = [torch.empty_like(encoded_chunk) for _ in range(world_size_total)]
+        dist.all_gather(full_encoded, encoded_chunk)
+
+        # Reconstruct full latent
+        encoded = self._reconstruct_2d(full_encoded, world_size_h, world_size_w, dim=3)
+
+        return encoded.squeeze(0).cpu()
+
+    def decode_dist_2d(
+        self,
+        latent: torch.Tensor,
+        world_size_h: int,
+        world_size_w: int,
+        cur_rank_h: int,
+        cur_rank_w: int,
+        device: torch.device,
+    ) -> torch.Tensor:
+        """Decode latent with true 2D spatial splitting.
+
+        Each GPU processes a fixed spatial region with proper padding for
+        boundary consistency. Uses single all_gather for communication.
+
+        Args:
+            latent: Input latent tensor [1, C, T, H, W]
+            world_size_h: Number of splits along H dimension
+            world_size_w: Number of splits along W dimension
+            cur_rank_h: Current rank's position in H grid
+            cur_rank_w: Current rank's position in W grid
+            device: Computation device
+
+        Returns:
+            Decoded video tensor on CPU [C, T_out, H_out, W_out]
+        """
+        spatial_ratio = self.upsampling_factor  # 8
+        padding_latent = 2  # 2 latent pixels padding for decode (larger kernel)
+
+        # Calculate chunk dimensions in latent space
+        latent_h = latent.shape[3]
+        latent_w = latent.shape[4]
+        chunk_h = latent_h // world_size_h
+        chunk_w = latent_w // world_size_w
+
+        # Compute slices with padding in latent space
+        h_start, h_end = self._compute_padded_slice(cur_rank_h, world_size_h, latent_h, chunk_h, padding_latent)
+        w_start, w_end = self._compute_padded_slice(cur_rank_w, world_size_w, latent_w, chunk_w, padding_latent)
+
+        # Extract latent chunk
+        latent_chunk = latent[:, :, :, h_start:h_end, w_start:w_end].contiguous()
+        latent_chunk = latent_chunk.to(device)
+
+        # Decode the chunk
+        decoded_chunk = self.model.decode(latent_chunk, self.scale)
+
+        # Calculate output chunk size (latent chunk * spatial_ratio)
+        chunk_h_output = chunk_h * spatial_ratio
+        chunk_w_output = chunk_w * spatial_ratio
+
+        # Remove padding from decoded result
+        decoded_chunk = self._remove_latent_padding(
+            decoded_chunk, cur_rank_h, cur_rank_w, world_size_h, world_size_w, chunk_h_output, chunk_w_output
+        )
+
+        # Gather all chunks
+        world_size_total = world_size_h * world_size_w
+        full_decoded = [torch.empty_like(decoded_chunk) for _ in range(world_size_total)]
+        dist.all_gather(full_decoded, decoded_chunk)
+
+        # Reconstruct full video
+        decoded = self._reconstruct_2d(full_decoded, world_size_h, world_size_w, dim=3)
+
+        return decoded.squeeze(0).cpu().clamp_(-1, 1)
+
+    def encode_parallel(
+        self,
+        videos: list[torch.Tensor],
+        device: torch.device,
+        method: str = "2d_split",
+        world_size_h: int | None = None,
+        world_size_w: int | None = None,
+    ) -> torch.Tensor:
+        """Encode videos with parallel processing across GPUs.
+
+        Args:
+            videos: List of video tensors [C, T, H, W]
+            device: Computation device
+            method: Parallel method, options:
+                - "2d_split": True 2D spatial splitting (recommended, fastest)
+                - "tile_dist": Tile task distribution (original method)
+            world_size_h: Manual H grid size (optional, auto-calculated if None)
+            world_size_w: Manual W grid size (optional, auto-calculated if None)
+
+        Returns:
+            Encoded latents tensor [B, C, T_latent, H_latent, W_latent]
+        """
+        world_size = dist.get_world_size()
+        cur_rank = dist.get_rank()
+
+        hidden_states = []
+        for video in videos:
+            video = video.unsqueeze(0)  # [1, C, T, H, W]
+            latent_h = video.shape[3] // self.upsampling_factor
+            latent_w = video.shape[4] // self.upsampling_factor
+
+            if method == "2d_split":
+                # Calculate 2D grid
+                if world_size_h is None or world_size_w is None:
+                    world_size_h, world_size_w = self.calculate_2d_grid(latent_h, latent_w, world_size)
+                cur_rank_h = cur_rank // world_size_w
+                cur_rank_w = cur_rank % world_size_w
+
+                hidden_state = self.encode_dist_2d(video, world_size_h, world_size_w, cur_rank_h, cur_rank_w, device)
+            else:  # "tile_dist"
+                # Original tile distribution method
+                tile_size = (34 * 8, 34 * 8)
+                tile_stride = (18 * 8, 16 * 8)
+                hidden_state = self.tiled_encode(video, device, tile_size, tile_stride)
+                hidden_state = hidden_state.squeeze(0)
+
+            hidden_states.append(hidden_state)
+
+        return torch.stack(hidden_states)
+
+    def decode_parallel(
+        self,
+        hidden_states: torch.Tensor,
+        device: torch.device,
+        method: str = "2d_split",
+        world_size_h: int | None = None,
+        world_size_w: int | None = None,
+    ) -> torch.Tensor:
+        """Decode latents with parallel processing across GPUs.
+
+        Args:
+            hidden_states: Latent tensor [B, C, T, H, W] or [C, T, H, W]
+            device: Computation device
+            method: Parallel method, options:
+                - "2d_split": True 2D spatial splitting (recommended, fastest)
+                - "tile_dist": Tile task distribution (original method)
+            world_size_h: Manual H grid size (optional, auto-calculated if None)
+            world_size_w: Manual W grid size (optional, auto-calculated if None)
+
+        Returns:
+            Decoded video tensor on CPU [B, C, T_out, H_out, W_out]
+        """
+        world_size = dist.get_world_size()
+        cur_rank = dist.get_rank()
+
+        # Handle single tensor
+        if hidden_states.dim() == 4:
+            hidden_states = hidden_states.unsqueeze(0)
+
+        batch_size = hidden_states.shape[0]
+        videos = []
+
+        for i in range(batch_size):
+            latent = hidden_states[i : i + 1]  # [1, C, T, H, W]
+            latent_h = latent.shape[3]
+            latent_w = latent.shape[4]
+
+            if method == "2d_split":
+                # Calculate 2D grid
+                if world_size_h is None or world_size_w is None:
+                    world_size_h, world_size_w = self.calculate_2d_grid(latent_h, latent_w, world_size)
+                cur_rank_h = cur_rank // world_size_w
+                cur_rank_w = cur_rank % world_size_w
+
+                video = self.decode_dist_2d(latent, world_size_h, world_size_w, cur_rank_h, cur_rank_w, device)
+            else:  # "tile_dist"
+                video = self.tiled_decode(latent, device, (34, 34), (18, 16))
+
+            videos.append(video)
+
+        return torch.stack(videos)
+
+    # ==================== Original Methods ====================
 
     def build_1d_mask(self, length: int, left_bound: bool, right_bound: bool, border_width: int) -> torch.Tensor:
         """Build 1D mask with linear blending at boundaries."""
@@ -840,13 +1284,41 @@ class WanVideoVAE(BaseModel):
         tile_size: tuple[int, int] = (34, 34),
         tile_stride: tuple[int, int] = (18, 16),
     ) -> torch.Tensor:
+        """Encode videos to latent space.
+
+        Automatically uses parallel processing if parallelism > 1 and distributed is initialized.
+        - Multi-GPU: tiled=True → tile_dist, tiled=False → 2d_split (default)
+        - Single GPU: tiled=True → tiled_encode, tiled=False → direct encode
+
+        Args:
+            videos: List of video tensors [C, T, H, W]
+            device: Computation device
+            tiled: Controls processing mode:
+                   - Single GPU: True = tiled processing, False = direct encode
+                   - Multi-GPU: True = tile_dist method, False = 2d_split method (default)
+            tile_size: Tile size for tiled processing
+            tile_stride: Tile stride for tiled processing
+
+        Returns:
+            Encoded latents tensor [B, C, T_latent, H_latent, W_latent]
+        """
+        # Auto-detect parallel mode
+        if self.parallelism > 1 and dist.is_initialized():
+            # tiled=True → tile_dist, tiled=False → 2d_split
+            method = "tile_dist" if tiled else "2d_split"
+            result = self.encode_parallel(videos, device, method=method)
+            # Parallel encode returns CPU tensors for memory efficiency
+            # Move to target device for consistency with single-GPU behavior
+            return result.to(device)
+
+        # Single GPU processing
         hidden_states = []
         for video in videos:
             video = video.unsqueeze(0)
             if tiled:
-                tile_size = (tile_size[0] * 8, tile_size[1] * 8)
-                tile_stride = (tile_stride[0] * 8, tile_stride[1] * 8)
-                hidden_state = self.tiled_encode(video, device, tile_size, tile_stride)
+                tile_size_scaled = (tile_size[0] * 8, tile_size[1] * 8)
+                tile_stride_scaled = (tile_stride[0] * 8, tile_stride[1] * 8)
+                hidden_state = self.tiled_encode(video, device, tile_size_scaled, tile_stride_scaled)
             else:
                 video = video.to(device)
                 hidden_state = self.model.encode(video, self.scale)
@@ -863,22 +1335,31 @@ class WanVideoVAE(BaseModel):
         tile_size: tuple[int, int] = (34, 34),
         tile_stride: tuple[int, int] = (18, 16),
     ) -> torch.Tensor:
-        """Unified decode for batched latent tensors.
+        """Decode latents to video frames.
 
-        Accepts tensor directly [B, C, T, H, W], loops over batch dimension.
-        Uses tiled_decode for large latents or model.decode for small latents.
+        Automatically uses parallel processing if parallelism > 1 and distributed is initialized.
+        - Multi-GPU: tiled=True → tile_dist, tiled=False → 2d_split (default)
+        - Single GPU: tiled=True → tiled_decode, tiled=False → direct decode
 
         Args:
             hidden_states: Latent tensor [B, C, T, H, W] or [C, T, H, W]
             device: Target device
-            tiled: If True, use tiled_decode for memory efficiency.
-                   If False, use model.decode directly.
+            tiled: Controls processing mode:
+                   - Single GPU: True = tiled processing, False = direct decode
+                   - Multi-GPU: True = tile_dist method, False = 2d_split method (default)
             tile_size: Tile size for tiled processing
             tile_stride: Tile stride for tiled processing
 
         Returns:
             Decoded video tensor on CPU [B, C, T_out, H_out, W_out]
         """
+        # Auto-detect parallel mode
+        if self.parallelism > 1 and dist.is_initialized():
+            # tiled=True → tile_dist, tiled=False → 2d_split
+            method = "tile_dist" if tiled else "2d_split"
+            return self.decode_parallel(hidden_states, device, method=method)
+
+        # Single GPU processing
         # Handle single tensor [C, T, H, W] by adding batch dimension
         if hidden_states.dim() == 4:
             hidden_states = hidden_states.unsqueeze(0)
