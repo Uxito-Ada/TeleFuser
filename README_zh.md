@@ -78,8 +78,12 @@ video = pipe(
 | `examples/wan_video/wan21_1_3b_text_to_video_hf.py` | 使用 HuggingFace 格式的文生视频 |
 | `examples/wan_video/wan21_14b_image_to_video_h100.py` | 图生视频 (I2V) |
 | `examples/wan_video/wan21_1_3b_text_to_video_h100.py` | 手动加载模型的文生视频 |
-| `examples/qwen_image/qwen_image_h100.py` | 文生图 |
+| `examples/wan_video/wan22_14b_first_last_frame_to_video_h100.py` | 首尾帧到视频 (FL2V) |
+| `examples/qwen_image/qwen_image_t2i_h100.py` | 文生图 |
 | `examples/wan_video/async_wan22_14b_image_to_video_distill_h100.py` | 异步管道演示 |
+| `examples/ltx_video/ltx23_22b_image_to_video_two_stage_h100.py` | LTX 2.3 两阶段音频视频生成 |
+| `examples/flux2_klein/flux2_klein_text_to_image_h100.py` | Flux2 Klein 文生图 |
+| `examples/liveact/liveact_s2v_h100.py` | LiveAct 语音驱动视频生成 |
 
 运行任意示例时使用 `--help` 查看可用选项：
 
@@ -199,26 +203,10 @@ pipe = Wan21VideoPipeline.from_pretrained(
 - [日志指南](docs/zh/logging.md) - 日志系统配置和使用
 - [指标监控指南](docs/zh/metrics.md) - 指标收集和监控
 
-## 支持的平台矩阵
-
-| 模型 | CFGP | USP | LoRA | FP8 | FSDP | 编码器并行 | 编译 | 异步管道 | 异步卸载 | 多机 | 服务器API | 特征缓存 | 蒸馏模型 |
-|------|------|-----|------|-----|------|------------|------|----------|----------|------|-----------|----------|----------|
-| Wan21 | ✔️   | ✔️  | ✔️   | ✔️  | ✔️   | ✔️         | ❔    | ✔️        | ❔       | ❔   | ✔️        | ✔️       | ❔       |
-| Wan22 | ✔️   | ✔️  | ✔️   | ✔️  | ✔️   | ✔️         | ❔    | ✔️        | ❔       | ❔   | ✔️        | ✔️       | ✔️       |
-| QwenImage | ✔️ | ✔️ | ✔️ | ✔️ | ✔️   | /          | ❔    | ❔        | ❔       | ❔   | ✔️        | ❔       | /        |
-| Z-Image | ✔️ | ✔️ | ✔️ | ✔️ | ✔️   | /          | ❔    | ❔        | ❔       | ❔   | ✔️        | ❔       | /        |
-| FlashVSR | ✔️ | ✔️ | ✔️ | ✔️ | ✔️   | /          | ❔    | ❔        | ❔       | ❔   | ✔️        | ❔       | /        |
-
-图例：
-- ✔️ = 已测试验证
-- ❔ = 应该可用，尚未测试
-- (空白) = 未实现
-- / = 不适用
-
 ## 已知限制
 
-- **特征缓存**：目前仅支持 Wan2.1 和 Wan2.2 模型
-- **编译**：Torch compile 支持处于实验阶段
+- **特征缓存**：目前支持 Wan2.1、Wan2.2、Qwen-Image 和 HunyuanVideo 模型
+- **编译**：Torch compile 支持处于实验阶段，详见 [torch.compile 兼容性指南](docs/zh/torch_compile_compatibility.md)
 - **多机**：跨多机分布式推理尚未测试
 - **GPU 要求**：部分功能（FP8、SageAttention）需要特定 GPU 架构（H100+）
 - **模型覆盖**：仅测试了选定模型；其他 Diffusers 模型可能需要适配

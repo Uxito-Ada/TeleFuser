@@ -62,6 +62,26 @@ TeleFuser 遵循严格的分层架构：
 - **性能优化**：ops 层在 eager 模式下使用优化的 Triton 内核
 - **关注点分离**：kernel 层专注纯内核实现，ops 层处理分发逻辑
 
+### 不同算子类型的 torch.compile 策略
+
+TeleFuser 采用**混合策略**处理 torch.compile 兼容性，根据算子特性优化：
+
+| 算子类型 | 策略 | 原因 |
+|:---------|:-----|:-----|
+| **Attention**（高计算密度） | `@torch.compiler.disable` | FlashAttention/SageAttention 性能远优于原生 PyTorch；融合收益有限 |
+| **RoPE**（中等计算密度） | `@torch.compiler.disable` | Triton 内核优于原生实现；后续 Attention 已阻断融合 |
+| **RMSNorm/LayerNorm**（低计算密度） | 编译时使用原生实现 | Overhead-bound；Inductor 可与相邻算子融合获得更好收益 |
+| **modulate**（点操作） | 编译时使用原生实现 | 计算量极小；Inductor 自动融合最优 |
+
+**执行流程示例**：
+```
+Linear → RMSNorm(q_norm) → RoPE → Attention
+                      ↑        ↑         ↑
+               原生+融合    Triton    Triton (disabled)
+```
+
+由于 Attention 使用了 `@torch.compiler.disable`，RoPE 之后融合已被阻断。因此 RoPE 使用 Triton 内核最大化单算子性能。
+
 ## 概述
 
 `telefuser/ops` 模块包含以下核心组件：

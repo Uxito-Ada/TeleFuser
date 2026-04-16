@@ -75,12 +75,15 @@ video = pipe(
 
 | Pipeline | Task | Examples | Features & Performance |
 |----------|------|----------|------------------------|
-| **WanVideo** | T2V, I2V | `examples/wan_video/` | [README](examples/wan_video/README.md) |
+| **WanVideo** | T2V, I2V, FL2V | `examples/wan_video/` | [README](examples/wan_video/README.md) |
 | **Qwen-Image** | T2I, Edit | `examples/qwen_image/` | [README](examples/qwen_image/README.md) |
 | **Z-Image** | T2I | `examples/z_image/` | [README](examples/z_image/README.md) |
 | **HunyuanVideo** | T2V, I2V | `examples/hunyuan_video/` | [README](examples/hunyuan_video/README.md) |
 | **FlashVSR** | VSR | `examples/flashvsr/` | [README](examples/flashvsr/README.md) |
 | **LongCat-Video** | T2V, I2V | `examples/longcat_video/` | [README](examples/longcat_video/README.md) |
+| **LTX Video** | I2V + Audio | `examples/ltx_video/` | [README](examples/ltx_video/README.md) |
+| **Flux2 Klein** | T2I | `examples/flux2_klein/` | [README](examples/flux2_klein/README.md) |
+| **LiveAct** | S2V | `examples/liveact/` | Speech-to-Video (talking head) |
 
 > 💡 **Tip:** Click the README links above to see detailed features, model sources, and performance metrics for each pipeline.
 
@@ -206,19 +209,22 @@ pipe = Wan21VideoPipeline.from_pretrained(
 
 | Pipeline | Task | Features & Performance |
 |----------|------|------------------------|
-| **WanVideo** (Wan2.1/2.2) | T2V, I2V | [Examples README](examples/wan_video/README.md) |
+| **WanVideo** (Wan2.1/2.2) | T2V, I2V, FL2V | [Examples README](examples/wan_video/README.md) |
 | **Qwen-Image** | T2I, Edit | [Examples README](examples/qwen_image/README.md) |
 | **Z-Image** | T2I | [Examples README](examples/z_image/README.md) |
 | **HunyuanVideo** | T2V, I2V | [Examples README](examples/hunyuan_video/README.md) |
 | **FlashVSR** | VSR | [Examples README](examples/flashvsr/README.md) |
 | **LongCat-Video** | T2V, I2V | [Examples README](examples/longcat_video/README.md) |
+| **LTX Video** | I2V + Audio | [Examples README](examples/ltx_video/README.md) |
+| **Flux2 Klein** | T2I | [Examples README](examples/flux2_klein/README.md) |
+| **LiveAct** | S2V | Speech-to-Video (talking head generation) |
 
 > 💡 See each pipeline's README for detailed feature support matrix and performance benchmarks.
 
 ## Known Limitations
 
-- **Feature Cache**: Currently only supports Wan2.1 and Wan2.2 models
-- **Compile**: Torch compile support is experimental
+- **Feature Cache**: Currently supports Wan2.1, Wan2.2, Qwen-Image, and HunyuanVideo models
+- **Compile**: Torch compile support is experimental, see [torch.compile Compatibility Guide](docs/en/torch_compile_compatibility.md)
 - **Multi-Machine**: Distributed inference across multiple machines is not yet tested
 - **GPU Requirements**: Some features (FP8, SageAttention) require specific GPU architectures (H100+)
 - **Model Coverage**: Only selected models are tested; other Diffusers models may require adaptation

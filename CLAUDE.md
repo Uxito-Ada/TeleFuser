@@ -6,7 +6,7 @@ TeleFuser is a high-performance framework for efficient multimodal generation mo
 
 **Tech Stack:** Python 3.10-3.13, PyTorch 2.6+, CUDA 12.8+, FastAPI, Ray
 
-**Supported Models:** WanVideo, Qwen-Image, Z-Image, FlashVSR, RealESRGAN, RIFT-HDV3
+**Supported Models:** WanVideo (Wan2.1/2.2), Qwen-Image, Z-Image, FlashVSR, HunyuanVideo, Flux2 Klein, LTX Video, LiveAct, LongCat-Video
 
 ## Commands
 
@@ -18,29 +18,57 @@ bash scripts/run_ci_tests.sh      # Full CI suite
 telefuser serve /path/to/pipeline.py --port 8000  # Start API server
 ```
 
+## Troubleshooting
+
+When multi-GPU inference hangs, zombie processes may remain. Clean them up with:
+
+```bash
+ps aux | grep -E 'spawn_main' | grep -v grep | awk '{print $2}' | xargs kill -9
+```
+
 ## Architecture
 
 ```
 telefuser/
 ├── core/             # Base abstractions: BasePipeline, BaseStage, configs
 ├── pipelines/        # Model-specific pipelines
+│   ├── wan_video/    # Wan2.1/2.2: T2V, I2V, FL2V
+│   ├── qwen_image/   # Qwen-Image: T2I, Edit
+│   ├── z_image/      # Z-Image: T2I
+│   ├── flashvsr/     # FlashVSR: VSR
+│   ├── hunyuan_video_1_5/  # HunyuanVideo: T2V, I2V
+│   ├── flux2_klein/  # Flux2 Klein: T2I
+│   ├── ltx_video/    # LTX Video: I2V + Audio
+│   ├── liveact/      # LiveAct: S2V (speech-to-video)
+│   ├── longcat_video/ # LongCat-Video: T2V, I2V
+│   └── common/       # Shared pipeline utilities
 ├── models/           # Model architectures: DiT, VAE, text encoders
 ├── ops/              # Custom operations: attention, FFN, normalization
 ├── kernel/           # Triton kernels: RMSNorm, rotary, quant, fused ops
+│   └── triton/       # Pure Triton implementations
 ├── platforms/        # Hardware abstraction: CUDA, NPU, CPU
 ├── distributed/      # FSDP, TP, PP, SP, Ring/Ulysses attention
 │   ├── ulysses_comm.py   # Ulysses All-to-All: ulysses_scatter_heads, ulysses_gather_heads
 │   ├── ring.py            # Ring P2P communication for long sequences
-│   └── pp_comm.py         # Pipeline parallelism
+│   ├── pp_comm.py         # Pipeline parallelism
+│   ├── fsdp.py            # Fully Sharded Data Parallel
+│   ├── tp_parallelize.py  # Tensor Parallelism
+│   └── parallel_shard.py  # Parallel sharding utilities
 ├── schedulers/       # Diffusion schedulers
 ├── feature_cache/    # Feature caching: AdaTaylorCache
+├── cache/            # General cache management
+├── offload/          # CPU offload strategies
+├── metrics/          # Metrics collection and monitoring
+├── orchestrator/     # Pipeline orchestration
+├── worker/           # Distributed worker management
+├── entrypoints/      # CLI entry points
 ├── service/          # FastAPI service
 └── client/           # Python SDK
 ```
 
-### Layer Architecture Principles
+### Layer Architecture Principles For Models
 
-TeleFuser follows a strict layered architecture for operations:
+TeleFuser's model follows a strict layered architecture for operations:
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
@@ -97,6 +125,7 @@ TeleFuser follows a strict layered architecture for operations:
 | Attention | [docs/en/attention.md](docs/en/attention.md) | [docs/zh/attention.md](docs/zh/attention.md) |
 | Configuration | [docs/en/configuration.md](docs/en/configuration.md) | [docs/zh/configuration.md](docs/zh/configuration.md) |
 | Feature Cache | [docs/en/feature_cache.md](docs/en/feature_cache.md) | [docs/zh/feature_cache.md](docs/zh/feature_cache.md) |
+| Hash Config Management | [docs/en/hash_config_management.md](docs/en/hash_config_management.md) | [docs/zh/hash_config_management.md](docs/zh/hash_config_management.md) |
 | Logging | [docs/en/logging.md](docs/en/logging.md) | [docs/zh/logging.md](docs/zh/logging.md) |
 | Metrics | [docs/en/metrics.md](docs/en/metrics.md) | [docs/zh/metrics.md](docs/zh/metrics.md) |
 | Model Loading | [docs/en/model_loading.md](docs/en/model_loading.md) | [docs/zh/model_loading.md](docs/zh/model_loading.md) |
@@ -106,13 +135,23 @@ TeleFuser follows a strict layered architecture for operations:
 | Profiler | [docs/en/profiler.md](docs/en/profiler.md) | [docs/zh/profiler.md](docs/zh/profiler.md) |
 | Service | [docs/en/service.md](docs/en/service.md) | [docs/zh/service.md](docs/zh/service.md) |
 | Testing | [docs/en/testing.md](docs/en/testing.md) | [docs/zh/testing.md](docs/zh/testing.md) |
+| torch.compile Compatibility | [docs/en/torch_compile_compatibility.md](docs/en/torch_compile_compatibility.md) | [docs/zh/torch_compile_compatibility.md](docs/zh/torch_compile_compatibility.md) |
 
 ## Key Configuration Classes
 
 Located in `telefuser/core/config.py`:
 - `AttnImplType`: Attention implementations (TORCH_SDPA, FLASH_ATTN_*, SAGE_ATTN_*, RADIAL_ATTN, etc.)
+- `AttentionConfig`: Attention configuration with sparse attention support
 - `ParallelConfig`: Distributed processing (device_ids, sp_ulysses_degree, sp_ring_degree)
 - `ModelRuntimeConfig`: Runtime settings (dtype, attention impl, offloading)
+- `FeatureCacheConfig`: Feature caching configuration for AdaTaylorCache
+- `CompileConfig`: torch.compile configuration
+- `QuantConfig`: Quantization settings (FP8, INT8)
+- `OffloadConfig`: CPU offload configuration
+- `LoraConfig`: LoRA weight loading configuration
+- `SparseAttentionConfig`: Sparse attention pattern configuration
+- `RayConfig`: Ray distributed inference configuration
+- `RayGPUConfig`: Ray GPU allocation configuration
 
 ## Key Distributed APIs
 
@@ -129,7 +168,14 @@ Located in `telefuser/kernel/triton/`:
 - `fused_scale_shift`: Fused scale and shift operations
 - `fused_layernorm_scale_shift_gate_select01`: LayerNorm + scale/shift + gate selection
 - `fused_residual_layernorm_scale_shift_gate_select01`: Residual add + LayerNorm + scale/shift + gate selection
+- `fused_scale_shift_gate_select`: Scale/shift + gate selection for dual-branch models
 - `apply_rotary_embedding`: Rotary Position Embedding (RoPE)
+- `fused_merge_attn_states`: Merge attention states with optional gating
+- `per_token_quant_fp8`: FP8 per-token quantization
+- `per_token_dequant_fp8`: FP8 per-token dequantization
+- `per_block_int8`: INT8 per-block quantization
+- `norm_infer`: Optimized normalization for inference
+- `triton_one_pass_rms_norm`: Single-pass RMSNorm
 
 ## Test Markers
 

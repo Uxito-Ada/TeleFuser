@@ -31,6 +31,7 @@
 |------|------|
 | [添加新模型](./zh/adding_new_model.md) | 集成新模型的分步指南 |
 | [Hash 配置管理](./zh/hash_config_management.md) | 管理模型哈希配置 |
+| [torch.compile 兼容性](./zh/torch_compile_compatibility.md) | 编写兼容 torch.compile 的推理代码 |
 
 ## 快速链接
 

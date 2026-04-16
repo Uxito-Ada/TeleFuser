@@ -31,6 +31,7 @@ Welcome to the TeleFuser documentation. This directory contains comprehensive gu
 |----------|-------------|
 | [Adding New Model](./en/adding_new_model.md) | Step-by-step guide for integrating new models |
 | [Hash Config Management](./en/hash_config_management.md) | Managing model hash configurations |
+| [torch.compile Compatibility](./en/torch_compile_compatibility.md) | Writing code compatible with torch.compile for inference |
 
 ## Quick Links
 

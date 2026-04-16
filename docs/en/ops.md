@@ -62,6 +62,26 @@ TeleFuser follows a strict layered architecture for operations:
 - **Performance**: ops layer uses optimized Triton kernels in eager mode
 - **Separation of concerns**: kernel layer focuses on pure kernel implementation, ops layer handles dispatch logic
 
+### torch.compile Strategy by Operator Type
+
+TeleFuser uses a **mixed strategy** for torch.compile compatibility, optimizing based on operator characteristics:
+
+| Operator Type | Strategy | Reason |
+|:--------------|:---------|:-------|
+| **Attention** (High compute density) | `@torch.compiler.disable` | FlashAttention/SageAttention outperform native PyTorch significantly; fusion gains limited |
+| **RoPE** (Medium compute density) | `@torch.compiler.disable` | Triton kernel outperforms native; subsequent Attention blocks fusion anyway |
+| **RMSNorm/LayerNorm** (Low compute density) | Native in compile mode | Overhead-bound; Inductor can fuse with adjacent ops for better gains |
+| **modulate** (Point operations) | Native in compile mode | Minimal compute; Inductor auto-fusion optimal |
+
+**Execution flow example**:
+```
+Linear → RMSNorm(q_norm) → RoPE → Attention
+                      ↑        ↑         ↑
+               Native+Fuse  Triton    Triton (disabled)
+```
+
+Since Attention uses `@torch.compiler.disable`, fusion beyond RoPE is blocked anyway. Therefore, RoPE uses Triton kernel to maximize single-operator performance.
+
 ## Overview
 
 The `telefuser/ops` module contains the following core components:
