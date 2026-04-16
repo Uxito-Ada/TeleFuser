@@ -201,7 +201,12 @@ class AsyncOffloadManager:
 
     @torch.compiler.disable
     def prefetch_layer(self, layer_idx: int, non_blocking: bool = True) -> None:
-        """Prefetch layer weights from CPU to GPU."""
+        """Prefetch layer weights from CPU to GPU.
+
+        Non-blocking: Does NOT wait on current compute stream, allowing
+        prefetch to start immediately during compute kernel execution.
+        Consumer syncs via wait_event when the layer is needed.
+        """
         if not self.enabled or self.device is None or self.copy_stream is None:
             return
         if layer_idx < 0 or layer_idx >= self.num_layers:
@@ -210,7 +215,6 @@ class AsyncOffloadManager:
             return
         if layer_idx not in self._consolidated_cpu_weights:
             return
-        self.copy_stream.wait_stream(torch.cuda.current_stream())
 
         self._ensure_gpu_buffer_pool_initialized()
 
