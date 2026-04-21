@@ -196,6 +196,19 @@ Located in `telefuser/kernel/triton/`:
 - See `CONTRIBUTING.md` for contribution guidelines
 - Update CLAUDE.md if needed (new patterns, new modules, architecture changes)
 
+## Interaction Workflow (MANDATORY)
+
+1. **Never end the conversation silently.** When work is completed or there are questions that need clarification, you MUST call the AskUserQuestion tool to get further instructions instead of ending the conversation directly.
+
+2. **Propose before executing.** Every time the user raises a new requirement, you MUST first propose a modification plan and communicate with the user for confirmation before executing the plan.
+
+3. **Maintain a TODO document.** During communication with the user, maintain a TODO task list (using the TaskCreate/TaskUpdate tools) and keep it updated in real time as tasks are added, modified, or completed.
+
+4. **Confirm at every stage.** After each call to the AskUserQuestion tool and after the user raises a new requirement:
+   - First, formulate a plan and confirm it with the user.
+   - After executing the plan, confirm the results with the user.
+   - Continue this loop until the user explicitly agrees to exit.
+
 ## Task Completion Checklist
 
 **After completing a coding task, ask the user:**
