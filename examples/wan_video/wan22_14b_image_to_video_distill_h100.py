@@ -11,6 +11,7 @@ from telefuser.pipelines.wan_video.wan22_video import (
     Wan22VideoPipeline,
     Wan22VideoPipelineConfig,
 )
+from telefuser.service.core.contract_templates import build_pipeline_manifest, build_task_contract_template
 from telefuser.utils.utils import get_example_name
 from telefuser.utils.video import get_target_image_size, save_video
 
@@ -35,6 +36,36 @@ PPL_CONFIG = dict(
     dit_high_path=TF_MODEL_ZOO_PATH
     + "/Wan2.2-Distill-Models/wan2.2_i2v_A14b_high_noise_lightx2v_4step_1030.safetensors",
     dit_low_path=TF_MODEL_ZOO_PATH + "/Wan2.2-Distill-Models/wan2.2_i2v_A14b_low_noise_lightx2v_4step.safetensors",
+)
+
+PIPELINE_MANIFEST = build_pipeline_manifest(
+    pipeline_name=PPL_CONFIG["name"],
+    supported_tasks=["i2v"],
+    task_contracts={
+        "i2v": build_task_contract_template(
+            "i2v",
+            parameter_overrides={
+                "prompt": {
+                    "description": "Positive guidance text prompt for Wan2.2 I2V distill inference.",
+                    "required": True,
+                },
+                "negative_prompt": {
+                    "default": "",
+                    "description": "Optional negative prompt prepended before the built-in distill negative prompt.",
+                },
+                "seed": {
+                    "default": PPL_CONFIG["seed"],
+                    "description": "Random seed used for the denoising trajectory.",
+                },
+                "resolution": {
+                    "default": PPL_CONFIG["resolution"],
+                    "description": "Output resolution passed through to run_with_file.",
+                    "enum": ["480p", "720p"],
+                },
+            },
+            excluded_parameters=("aspect_ratio", "target_video_length"),
+        )
+    },
 )
 
 
@@ -156,6 +187,7 @@ def run_with_file(
     negative_prompt,
     seed,
     output_path,
+    resolution=PPL_CONFIG["resolution"],
     **kwargs,
 ):
     """Run pipeline and save to file."""
@@ -165,6 +197,7 @@ def run_with_file(
         prompt,
         negative_prompt,
         seed,
+        resolution,
     )
     print(f"Saving video to {output_path}")
     save_video(
