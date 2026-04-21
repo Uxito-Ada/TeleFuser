@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
+import json
 import threading
 from pathlib import Path
 from types import ModuleType
@@ -20,6 +21,7 @@ from ..security.security_validator import (
     validate_with_report,
 )
 from .config import server_config
+from .pipeline_contract import load_pipeline_contract
 from .pipeline_runner import PipelineRunner
 
 mp.set_start_method("spawn", force=True)
@@ -46,6 +48,8 @@ class PipelineService:
 
         self._module: ModuleType | None = None
         self._runner: PipelineRunner | None = None
+        self._contract = None
+        self._declared_contract = False
 
         self.security_level = security_level or getattr(server_config, "security_level", SecurityLevel.STRICT)
         self.security_validator = PipelineSecurityValidator(
@@ -139,19 +143,33 @@ class PipelineService:
             self.parallelism = parallelism
 
             self._module = self._load_pipeline_module(ppl_file)
-            if not hasattr(self._module, "get_pipeline"):
-                raise RuntimeError("Pipeline file must define get_pipeline(parallelism=...)")
-            if not hasattr(self._module, "run_with_file"):
-                raise RuntimeError("Pipeline file must define run_with_file(...) for service execution")
+            self._contract, self._declared_contract = load_pipeline_contract(
+                self._module,
+                ppl_file=ppl_file,
+                default_task=task,
+            )
 
-            get_pipeline = getattr(self._module, "get_pipeline")
-            run_with_file = getattr(self._module, "run_with_file")
+            if task not in self._contract.supported_tasks:
+                raise RuntimeError(
+                    f"Pipeline contract for {self._contract.pipeline_name} does not declare support for task '{task}'"
+                )
+
+            get_pipeline_name = self._contract.entrypoints.get_pipeline
+            run_with_file_name = self._contract.entrypoints.run_with_file
+            if not hasattr(self._module, get_pipeline_name):
+                raise RuntimeError(f"Pipeline file must define {get_pipeline_name}(parallelism=...)")
+            if not hasattr(self._module, run_with_file_name):
+                raise RuntimeError(f"Pipeline file must define {run_with_file_name}(...) for service execution")
+
+            get_pipeline = getattr(self._module, get_pipeline_name)
+            run_with_file = getattr(self._module, run_with_file_name)
 
             self.pipeline = get_pipeline(parallelism=parallelism)
             self._runner = PipelineRunner(pipeline=self.pipeline, run_with_file=run_with_file, module=self._module)
             self.is_running = True
 
             logger.info(f"Pipeline service started with security_level={self.security_level.name}")
+            self._log_contract_startup_summary()
             return True
 
         except SecurityError as e:
@@ -175,6 +193,8 @@ class PipelineService:
         finally:
             self._runner = None
             self._module = None
+            self._contract = None
+            self._declared_contract = False
 
             if self.pipeline is not None:
                 try:
@@ -227,13 +247,79 @@ class PipelineService:
 
     def server_metadata(self) -> dict:
         """Get server metadata."""
-        return {
+        metadata = {
             "pipeline_file": self.ppl_file,
             "parallelism": self.parallelism,
             "task": self.task,
             "security_level": self.security_level.name if self.security_level else "NONE",
             "runner": "PipelineRunner",
+            "declared_pipeline_contract": self._declared_contract,
         }
+        if self._contract is not None:
+            metadata.update(self._contract.to_metadata())
+        return metadata
+
+    def supported_tasks(self) -> tuple[str, ...]:
+        """Return tasks declared by the loaded pipeline contract."""
+        if self._contract is None:
+            return tuple()
+        return self._contract.supported_tasks
+
+    def get_task_contract(self, task: str):
+        """Return the task-level contract for a declared task, if available."""
+        if self._contract is None:
+            return None
+        return self._contract.get_task_contract(task)
+
+    def _log_contract_startup_summary(self) -> None:
+        """Log a concise startup summary of the active pipeline contract."""
+        if self._contract is None:
+            return
+
+        pipeline_summary = {
+            "pipeline_name": self._contract.pipeline_name,
+            "declared_pipeline_contract": self._declared_contract,
+            "supported_tasks": list(self._contract.supported_tasks),
+            "supported_media_types": list(self._contract.supported_media_types),
+            "execution_mode": self._contract.execution_mode,
+            "effective_max_concurrent_tasks": self._contract.effective_max_concurrent_tasks,
+            "entrypoints": {
+                "get_pipeline": self._contract.entrypoints.get_pipeline,
+                "run_with_file": self._contract.entrypoints.run_with_file,
+            },
+            "metadata_endpoint": "/v1/service/metadata",
+        }
+        logger.info(
+            "Pipeline contract startup summary: "
+            f"{json.dumps(pipeline_summary, ensure_ascii=True, sort_keys=True, default=str)}"
+        )
+
+        for task in self._contract.supported_tasks:
+            task_contract = self._contract.get_task_contract(task)
+            if task_contract is None:
+                continue
+
+            task_summary = {
+                "task": task,
+                "media_type": task_contract.media_type,
+                "required_inputs": list(task_contract.required_inputs),
+                "optional_inputs": list(task_contract.optional_inputs),
+                "parameters": {
+                    name: {
+                        "type": parameter.type,
+                        "required": parameter.required,
+                        "default": parameter.default,
+                        "enum": list(parameter.enum),
+                    }
+                    for name, parameter in task_contract.parameters.items()
+                    if parameter.exposed
+                },
+                "metadata_endpoint": "/v1/service/metadata",
+            }
+            logger.info(
+                "Pipeline task startup summary: "
+                f"{json.dumps(task_summary, ensure_ascii=True, sort_keys=True, default=str)}"
+            )
 
     def __del__(self) -> None:
         """Destructor - attempts cleanup but should not be relied upon."""

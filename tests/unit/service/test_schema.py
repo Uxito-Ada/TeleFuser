@@ -66,7 +66,7 @@ class TestTaskRequest:
 
     def test_valid_tasks(self):
         """Test valid task values."""
-        valid_tasks = ["t2v", "i2v", "fl2v", "vc", "t2i", "i2i"]
+        valid_tasks = ["t2v", "i2v", "fl2v", "vc", "t2i", "i2i", "s2v", "vsr", "custom_task"]
 
         for task in valid_tasks:
             request = TaskRequest(task=task)
@@ -75,7 +75,7 @@ class TestTaskRequest:
     def test_invalid_task(self):
         """Test invalid task raises error."""
         with pytest.raises(ValidationError):
-            TaskRequest(task="invalid_task")
+            TaskRequest(task="Invalid Task!")
 
     def test_get_method(self):
         """Test get method for attribute access."""
@@ -104,6 +104,13 @@ class TestTaskRequest:
         request = TaskRequest(output_path="custom/path/video.mp4")
 
         assert request.output_path == "custom/path/video.mp4"
+
+    def test_extra_contract_fields_are_preserved(self):
+        """TaskRequest should preserve extra contract-managed fields for runner execution."""
+        request = TaskRequest(task="t2v", num_inference_steps=8)
+
+        assert request.num_inference_steps == 8
+        assert request.model_dump()["num_inference_steps"] == 8
 
 
 class TestTaskStatusMessage:

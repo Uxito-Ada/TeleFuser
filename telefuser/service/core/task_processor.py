@@ -37,6 +37,12 @@ class AsyncTaskProcessor:
         self._workers: list[asyncio.Task] = []
         self._running = False
         self._stop_event = asyncio.Event()
+        self._loop: asyncio.AbstractEventLoop | None = None
+
+    @property
+    def is_running(self) -> bool:
+        """Whether the processor workers are running."""
+        return self._running
 
     async def start(self) -> None:
         """Start the task processor workers."""
@@ -46,6 +52,7 @@ class AsyncTaskProcessor:
 
         self._running = True
         self._stop_event.clear()
+        self._loop = asyncio.get_running_loop()
 
         for i in range(self.max_concurrent):
             worker = asyncio.create_task(self._worker_loop(f"worker-{i}"), name=f"task-processor-{i}")
@@ -66,9 +73,20 @@ class AsyncTaskProcessor:
             worker.cancel()
 
         if self._workers:
-            await asyncio.gather(*self._workers, return_exceptions=True)
+            current_loop = asyncio.get_running_loop()
+            worker_loops = {worker.get_loop() for worker in self._workers}
+
+            if any(loop.is_closed() for loop in worker_loops):
+                logger.warning("Skipping worker await during shutdown because the worker event loop is already closed")
+            elif worker_loops == {current_loop}:
+                await asyncio.gather(*self._workers, return_exceptions=True)
+            else:
+                logger.warning(
+                    "Skipping worker await during shutdown because stop() was called from a different event loop"
+                )
 
         self._workers.clear()
+        self._loop = None
         logger.info("Task processor stopped")
 
     async def _worker_loop(self, worker_name: str) -> None:
@@ -110,11 +128,14 @@ class AsyncTaskProcessor:
             return
 
         try:
-            self.task_manager.start_task(task_id)
+            task_info = self.task_manager.start_task(task_id)
+
+            if task_info.status == TaskStatus.CANCELLED:
+                logger.info(f"Task {task_id} was cancelled before processing started")
+                return
 
             if task_info.stop_event.is_set():
                 logger.info(f"Task {task_id} cancelled before processing")
-                self.task_manager.fail_task(task_id, "Task cancelled")
                 return
 
             result = await self.media_service.generate_media_with_stop_event(task_info.message, task_info.stop_event)
@@ -124,13 +145,15 @@ class AsyncTaskProcessor:
                 logger.info(f"Task {task_id} completed successfully")
             else:
                 if task_info.stop_event.is_set():
-                    self.task_manager.fail_task(task_id, "Task cancelled during processing")
                     logger.info(f"Task {task_id} cancelled during processing")
                 else:
                     self.task_manager.fail_task(task_id, "Generation failed")
                     logger.error(f"Task {task_id} generation failed")
 
         except Exception as e:
+            if task_info.stop_event.is_set():
+                logger.info(f"Task {task_id} exited after cancellation")
+                return
             logger.exception(f"Task {task_id} processing failed")
             self.task_manager.fail_task(task_id, str(e))
 

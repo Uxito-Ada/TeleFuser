@@ -2,13 +2,16 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from ..core.pipeline_contract import infer_media_type_for_task, validate_task_name_format
 from .utils import generate_task_id
 
 
 class TaskRequest(BaseModel):
     """Request model for media generation tasks."""
+
+    model_config = ConfigDict(extra="allow")
 
     task_id: str = Field(default_factory=generate_task_id, description="Task ID (auto-generated)")
     task: str = Field("t2v", description="t2v, i2v, fl2v, vc, t2i, i2i")
@@ -41,16 +44,13 @@ class TaskRequest(BaseModel):
     @field_validator("task")
     @classmethod
     def validate_task(cls: type[TaskRequest], v: str) -> str:
-        allowed = ["t2v", "i2v", "fl2v", "vc", "t2i", "i2i"]
-        if v not in allowed:
-            raise ValueError(f"Invalid task type. Allowed values are: {', '.join(allowed)}")
-        return v
+        return validate_task_name_format(v)
 
     def __init__(self, **data) -> None:
         super().__init__(**data)
         if not self.output_path:
             # Set default output path based on task type
-            if self.task in ["t2i", "i2i"]:
+            if infer_media_type_for_task(self.task) == "image":
                 self.output_path = f"{self.task_id}.{self.output_format}"
             else:
                 self.output_path = f"{self.task_id}.mp4"

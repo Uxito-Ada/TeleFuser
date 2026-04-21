@@ -5,7 +5,7 @@ from __future__ import annotations
 from typing import Literal
 
 from pydantic import Field, field_validator
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from ..security.security_validator import SecurityLevel
 
@@ -16,9 +16,24 @@ class ServerConfig(BaseSettings):
     Uses Pydantic for validation and environment variable support.
     """
 
+    model_config = SettingsConfigDict(
+        env_prefix="TELEFUSER_",
+        case_sensitive=False,
+        extra="ignore",
+    )
+
     # Task settings
     task_timeout: int = Field(default=1200, ge=60, le=3600, description="Task timeout in seconds")
-    max_concurrent_tasks: int = Field(default=10, ge=1, le=100, description="Maximum concurrent tasks")
+    max_concurrent_tasks: int = Field(
+        default=10,
+        ge=1,
+        le=100,
+        description=(
+            "Deprecated compatibility field. A single ppl instance is currently executed serially, "
+            "so effective task concurrency is forced to 1. Use max_queue_size to control the maximum "
+            "number of queued plus running tasks."
+        ),
+    )
     max_queue_size: int = Field(default=10, ge=1, le=1000, description="Maximum queue size")
 
     # Task cleanup settings
@@ -138,10 +153,10 @@ class ServerConfig(BaseSettings):
         except Exception as e:
             raise ValueError(f"Invalid configuration: {e}")
 
-    class Config:
-        env_prefix = "TELEFUSER_"
-        case_sensitive = False
-        extra = "ignore"  # Ignore extra fields for forward compatibility
+    @property
+    def effective_max_concurrent_tasks(self) -> int:
+        """Effective task concurrency for the current single-pipeline runtime."""
+        return 1
 
 
 # Global server configuration instance

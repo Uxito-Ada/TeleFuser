@@ -11,6 +11,7 @@ from enum import Enum
 from typing import Any
 
 from telefuser.metrics import get_service_metrics
+from telefuser.service.core.pipeline_contract import infer_media_type_for_task
 from telefuser.utils.logging import logger
 
 
@@ -103,6 +104,9 @@ class TaskManager:
                 raise KeyError(f"Task {task_id} not found")
 
             task = self._tasks[task_id]
+            if task.status != TaskStatus.PENDING:
+                return task
+
             task.status = TaskStatus.PROCESSING
             task.start_time = datetime.now()
 
@@ -118,6 +122,10 @@ class TaskManager:
                 return
 
             task = self._tasks[task_id]
+            if task.status in [TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED]:
+                logger.info(f"Ignoring completion for task {task_id} in terminal state {task.status.value}")
+                return
+
             task.status = TaskStatus.COMPLETED
             task.end_time = datetime.now()
             if output_path:
@@ -137,6 +145,10 @@ class TaskManager:
                 return
 
             task = self._tasks[task_id]
+            if task.status in [TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED]:
+                logger.info(f"Ignoring failure for task {task_id} in terminal state {task.status.value}")
+                return
+
             task.status = TaskStatus.FAILED
             task.end_time = datetime.now()
             task.error = error
@@ -146,6 +158,8 @@ class TaskManager:
 
     def cancel_task(self, task_id: str) -> bool:
         """Cancel a pending or processing task."""
+        thread_to_join: threading.Thread | None = None
+
         with self._lock:
             if task_id not in self._tasks:
                 return False
@@ -163,9 +177,12 @@ class TaskManager:
             get_service_metrics().record_task_cancelled()
 
             if task.thread and task.thread.is_alive():
-                task.thread.join(timeout=self.cancel_timeout)
+                thread_to_join = task.thread
 
-            return True
+        if thread_to_join is not None:
+            thread_to_join.join(timeout=self.cancel_timeout)
+
+        return True
 
     def cancel_all_tasks(self) -> None:
         """Cancel all pending or processing tasks."""
@@ -185,7 +202,7 @@ class TaskManager:
         if not task:
             return None
 
-        return {
+        status = {
             "task_id": task.task_id,
             "status": task.status.value,
             "start_time": task.start_time,
@@ -193,6 +210,8 @@ class TaskManager:
             "error": task.error,
             "output_path": task.output_path,
         }
+        status.update(self._serialize_task_message(task.message))
+        return status
 
     def get_all_tasks(self) -> dict[str, dict[str, Any] | None]:
         """Get all tasks as status dictionaries."""
@@ -281,3 +300,32 @@ class TaskManager:
         for task_id, _ in completed_tasks[:remove_count]:
             del self._tasks[task_id]
             logger.debug(f"Cleaned up old task: {task_id}")
+
+    def _serialize_task_message(self, message: Any) -> dict[str, Any]:
+        """Extract stable task metadata needed by server APIs from the original request object."""
+        if message is None:
+            return {}
+
+        data: dict[str, Any] = {}
+        for field_name in (
+            "task",
+            "prompt",
+            "negative_prompt",
+            "resolution",
+            "target_video_length",
+            "aspect_ratio",
+            "output_format",
+            "model",
+            "first_image_path",
+            "last_image_path",
+            "ref_video_path",
+        ):
+            value = getattr(message, field_name, None)
+            if value not in (None, ""):
+                data[field_name] = value
+
+        task_name = data.get("task") or getattr(message, "task", None)
+        if task_name:
+            data["media_type"] = infer_media_type_for_task(task_name)
+
+        return data

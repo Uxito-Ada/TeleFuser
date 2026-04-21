@@ -3,8 +3,7 @@
 from __future__ import annotations
 
 import asyncio
-import threading
-import time
+import inspect
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
@@ -18,6 +17,7 @@ from telefuser.utils.logging import logger
 from ..core.file_service import FileService
 from ..core.pipeline_service import PipelineService
 from ..core.task_manager import TaskManager, TaskStatus
+from ..core.task_processor import AsyncTaskProcessor
 from ..core.task_service import MediaGenerationService
 from . import routers
 
@@ -32,6 +32,8 @@ class ApiServer:
     def __init__(
         self,
         max_queue_size: int = 10,
+        max_concurrent_tasks: int = 1,
+        configured_max_concurrent_tasks: int | None = None,
         app: FastAPI | None = None,
         task_manager: TaskManager | None = None,
         enable_rate_limit: bool = True,
@@ -51,11 +53,13 @@ class ApiServer:
         self.inference_service: PipelineService | None = None
         self.media_service: MediaGenerationService | None = None
         self.max_queue_size = max_queue_size
+        self.max_concurrent_tasks = max_concurrent_tasks
+        self.configured_max_concurrent_tasks = configured_max_concurrent_tasks or max_concurrent_tasks
         self._task_manager = task_manager
         self.enable_openai_api = enable_openai_api
 
-        self.processing_thread: threading.Thread | None = None
-        self.stop_processing = threading.Event()
+        self.task_processor: AsyncTaskProcessor | None = None
+        self._task_processor_lock = asyncio.Lock()
 
         self._setup_routes()
 
@@ -163,87 +167,112 @@ class ApiServer:
             logger.warning(f"URL validation failed for {image_url}: {str(e)}")
             return False
 
-    def _ensure_processing_thread_running(self) -> None:
-        """Ensure the task processing thread is running."""
-        if self.processing_thread is None or not self.processing_thread.is_alive():
-            self.stop_processing.clear()
-            self.processing_thread = threading.Thread(target=self._task_processing_loop, daemon=True)
-            self.processing_thread.start()
-            logger.info("Started task processing thread")
-
-    def _task_processing_loop(self) -> None:
-        """Main loop that processes tasks from the queue one by one."""
-        logger.info("Task processing loop started")
-
-        while not self.stop_processing.is_set():
-            task_id = self.task_manager.get_next_pending_task()
-
-            if task_id is None:
-                time.sleep(1)
-                continue
-
-            task_info = self.task_manager.get_task(task_id)
-            if task_info and task_info.status == TaskStatus.PENDING:
-                logger.info(f"Processing task {task_id}")
-                self._process_single_task(task_info)
-
-        logger.info("Task processing loop stopped")
-
-    def _process_single_task(self, task_info: Any) -> None:
-        """Process a single task with proper locking."""
-        assert self.media_service is not None, "Media service is not initialized"
-
-        task_id = task_info.task_id
-        message = task_info.message
-
-        lock_acquired = self.task_manager.acquire_processing_lock(task_id, timeout=1)
-        if not lock_acquired:
-            logger.error(f"Task {task_id} failed to acquire processing lock")
-            self.task_manager.fail_task(task_id, "Failed to acquire processing lock")
+    async def ensure_task_processor_running(self) -> None:
+        """Ensure the async task processor is running."""
+        if self.task_processor is None:
+            logger.warning("Task processor is not initialized; task will remain pending until services are ready")
             return
 
-        try:
-            self.task_manager.start_task(task_id)
+        if self.task_processor.is_running:
+            return
 
-            if task_info.stop_event.is_set():
-                logger.info(f"Task {task_id} cancelled before processing")
-                self.task_manager.fail_task(task_id, "Task cancelled")
+        async with self._task_processor_lock:
+            if self.task_processor is None:
+                logger.warning("Task processor is not initialized; task will remain pending until services are ready")
                 return
+            if self.task_processor.is_running:
+                return
+            await self.task_processor.start()
 
-            result = asyncio.run(self.media_service.generate_media_with_stop_event(message, task_info.stop_event))
+    def get_supported_tasks(self) -> tuple[str, ...]:
+        """Get tasks supported by the loaded pipeline contract, if available."""
+        if self.inference_service is None:
+            return tuple()
 
-            if result:
-                self.task_manager.complete_task(task_id, result.output_path)
-                logger.info(f"Task {task_id} completed successfully")
-            else:
-                if task_info.stop_event.is_set():
-                    self.task_manager.fail_task(task_id, "Task cancelled during processing")
-                    logger.info(f"Task {task_id} cancelled during processing")
-                else:
-                    self.task_manager.fail_task(task_id, "Generation failed")
-                    logger.error(f"Task {task_id} generation failed")
+        supports = getattr(self.inference_service, "supported_tasks", None)
+        if callable(supports):
+            try:
+                tasks = supports()
+                if isinstance(tasks, (list, tuple, set, frozenset)):
+                    return tuple(str(task) for task in tasks)
+            except Exception as e:
+                logger.warning(f"Failed to query supported tasks from inference service: {e}")
 
-        except Exception as e:
-            logger.exception(f"Task {task_id} processing failed")
-            self.task_manager.fail_task(task_id, str(e))
-        finally:
-            if lock_acquired:
-                self.task_manager.release_processing_lock(task_id)
+        metadata_fn = getattr(self.inference_service, "server_metadata", None)
+        if callable(metadata_fn):
+            try:
+                metadata = metadata_fn()
+                tasks = metadata.get("supported_tasks") or []
+                return tuple(str(task) for task in tasks)
+            except Exception as e:
+                logger.warning(f"Failed to query supported tasks from inference service metadata: {e}")
+
+        return tuple()
+
+    def validate_task_supported(self, task: str) -> None:
+        """Validate that the current pipeline supports the requested task."""
+        supported_tasks = self.get_supported_tasks()
+        if supported_tasks and task not in supported_tasks:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "message": f"Task '{task}' is not supported by the current pipeline",
+                    "supported_tasks": list(supported_tasks),
+                },
+            )
+
+    def get_task_contract(self, task: str) -> dict[str, Any] | None:
+        """Get task-level contract metadata for the current pipeline, if available."""
+        if self.inference_service is None:
+            return None
+
+        getter = getattr(self.inference_service, "get_task_contract", None)
+        if callable(getter):
+            try:
+                contract = getter(task)
+                if isinstance(contract, dict):
+                    return contract
+                if contract is not None and hasattr(contract, "to_metadata"):
+                    metadata = contract.to_metadata()
+                    if isinstance(metadata, dict):
+                        return metadata
+            except Exception as e:
+                logger.warning(f"Failed to query task contract from inference service: {e}")
+
+        metadata_fn = getattr(self.inference_service, "server_metadata", None)
+        if callable(metadata_fn):
+            try:
+                metadata = metadata_fn()
+                task_contracts = metadata.get("task_contracts") or {}
+                contract = task_contracts.get(task)
+                if isinstance(contract, dict):
+                    return contract
+            except Exception as e:
+                logger.warning(f"Failed to query task contract from inference service metadata: {e}")
+        return None
 
     def initialize_services(self, cache_dir: Path, inference_service: PipelineService) -> None:
         """Initialize file and media services."""
         self.file_service = FileService(cache_dir)
         self.inference_service = inference_service
         self.media_service = MediaGenerationService(self.file_service, inference_service)
+        self.task_processor = AsyncTaskProcessor(
+            task_manager=self.task_manager,
+            media_service=self.media_service,
+            max_concurrent=self.max_concurrent_tasks,
+        )
 
     async def cleanup(self) -> None:
-        """Cleanup resources and stop processing thread."""
-        self.stop_processing.set()
-        if self.processing_thread and self.processing_thread.is_alive():
-            self.processing_thread.join(timeout=5)
+        """Cleanup resources and stop processing workers."""
+        if self.task_processor is not None:
+            await self.task_processor.stop()
 
         if self.file_service:
-            await self.file_service.cleanup()
+            cleanup = getattr(self.file_service, "cleanup", None)
+            if cleanup is not None:
+                result = cleanup()
+                if inspect.isawaitable(result):
+                    await result
 
     def get_app(self) -> FastAPI:
         """Get the FastAPI application instance."""

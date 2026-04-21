@@ -26,14 +26,19 @@ class ServiceRoutes:
 
     async def get_status(self) -> dict:
         """Get service status."""
-        return self.api.task_manager.get_service_status()
+        status = self.api.task_manager.get_service_status()
+        status["execution_mode"] = "serial_single_pipeline"
+        status["effective_max_concurrent_tasks"] = self.api.max_concurrent_tasks
+        status["configured_max_concurrent_tasks"] = self.api.configured_max_concurrent_tasks
+        return status
 
     async def get_metadata(self) -> dict:
         """Get service metadata."""
         assert self.api.inference_service is not None, "Inference service is not initialized"
         metadata = self.api.inference_service.server_metadata()
-        metadata["supported_tasks"] = ["t2v", "i2v", "fl2v", "vc", "t2i", "i2i"]
-        metadata["supported_media_types"] = ["video", "image"]
+        metadata["service_effective_max_concurrent_tasks"] = self.api.max_concurrent_tasks
+        metadata["service_configured_max_concurrent_tasks"] = self.api.configured_max_concurrent_tasks
+        metadata["max_queue_size"] = self.api.max_queue_size
         return metadata
 
     async def health_check(self) -> dict:

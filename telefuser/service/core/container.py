@@ -12,6 +12,8 @@ from typing import Any
 
 from fastapi import FastAPI
 
+from telefuser.utils.logging import logger
+
 from .config import ServerConfig, server_config
 from .file_service import FileService
 from .pipeline_service import PipelineService
@@ -44,6 +46,14 @@ class ServiceContainer:
     ) -> ServiceContainer:
         """Create a new service container with all dependencies."""
         config = config or server_config
+
+        if config.max_concurrent_tasks != config.effective_max_concurrent_tasks:
+            logger.warning(
+                "Configured max_concurrent_tasks=%s but effective task concurrency is fixed to %s "
+                "for a single ppl instance. Use max_queue_size to control queue admission.",
+                config.max_concurrent_tasks,
+                config.effective_max_concurrent_tasks,
+            )
 
         task_manager = TaskManager(
             max_queue_size=config.max_queue_size,
@@ -127,6 +137,8 @@ class ServiceContainer:
 
         api_server = ApiServer(
             max_queue_size=self.config.max_queue_size,
+            max_concurrent_tasks=self.config.effective_max_concurrent_tasks,
+            configured_max_concurrent_tasks=self.config.max_concurrent_tasks,
             task_manager=self.task_manager,
             enable_rate_limit=enable_rate_limit,
             enable_logging=False,
