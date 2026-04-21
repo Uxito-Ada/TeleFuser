@@ -93,6 +93,13 @@ Run any example with `--help` to see available options:
 python examples/wan_video/wan21_1_3b_text_to_video_hf.py --help
 ```
 
+Examples that support `telefuser serve` can also declare a pipeline contract through `PIPELINE_MANIFEST`,
+`PIPELINE_CONTRACT`, or the corresponding factory functions. The server uses that contract to determine supported
+tasks, required file inputs, and user-facing request parameters instead of exposing every internal pipeline knob.
+
+📖 See [Adding New Example](docs/en/adding_new_example.md) for authoring rules and [Service Documentation](docs/en/service.md)
+for how the server consumes the contract.
+
 ## Architecture Highlights
 
 ### Asynchronous Pipeline Scheduling
@@ -159,6 +166,15 @@ TeleFuser provides a FastAPI-based REST API server with dual API support:
 # Start the server
 telefuser serve /path/to/pipeline.py --port 8000
 ```
+
+When a pipeline file provides a manifest/contract, `telefuser serve` uses it as the source of truth for:
+
+- supported tasks such as `t2v`, `i2v`, `fl2v`, and `vc`
+- required upload inputs such as images or videos
+- user-facing request defaults and required fields
+- service metadata returned by `/v1/service/metadata`
+
+Keep user-facing parameters in the contract, and keep internal tuning values in `PPL_CONFIG` or implementation code.
 
 📖 **For detailed API documentation, client SDK, and examples, see [Service Documentation](docs/en/service.md).**
 

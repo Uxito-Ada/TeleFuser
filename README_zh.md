@@ -91,6 +91,12 @@ video = pipe(
 python examples/wan_video/wan21_1_3b_text_to_video_hf.py --help
 ```
 
+支持 `telefuser serve` 的 example 还可以通过 `PIPELINE_MANIFEST`、`PIPELINE_CONTRACT` 或对应的工厂函数声明
+一份 pipeline contract。服务端会以它作为能力来源，判断支持哪些 task、需要哪些文件输入，以及对外暴露哪些用户参数，
+而不是把内部 pipeline 调参项全部暴露出去。
+
+📖 具体编写方式见 [添加新 Example](docs/zh/adding_new_example.md)，服务端消费方式见 [Service 文档](docs/zh/service.md)。
+
 ## 架构亮点
 
 ### 异步管道调度
@@ -157,6 +163,15 @@ TeleFuser 提供基于 FastAPI 的 REST API 服务器，支持双 API 模式：
 # 启动服务器
 telefuser serve /path/to/pipeline.py --port 8000
 ```
+
+当 pipeline 文件提供 manifest/contract 时，`telefuser serve` 会把它作为以下内容的唯一事实来源：
+
+- 支持的 task，例如 `t2v`、`i2v`、`fl2v`、`vc`
+- 必需的上传输入，例如图片或视频
+- 用户可见请求参数的默认值与必填约束
+- `/v1/service/metadata` 返回的服务元数据
+
+应当把用户可见参数放进 contract，把内部调参项继续保留在 `PPL_CONFIG` 或实现代码里。
 
 📖 **详细 API 文档、客户端 SDK 和示例请参阅 [Service 文档](docs/zh/service.md)。**
 

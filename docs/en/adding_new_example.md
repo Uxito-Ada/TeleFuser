@@ -297,6 +297,72 @@ PPL_CONFIG = dict(
 | `model_root` | **Required**. Base directory containing all model files. Can be overridden via CLI `--model_root` |
 | Model file paths | Use relative filenames under `model_root`, e.g., `dit_filename`, `vae_filename`. Special models can use absolute paths if needed |
 
+### Server Contract for Examples
+
+If the example should work with `telefuser serve`, add a pipeline contract next to `PPL_CONFIG`. The recommended
+pattern is to use `build_pipeline_manifest()` and `build_task_contract_template()`.
+
+```python
+from telefuser.service.core.contract_templates import (
+    build_pipeline_manifest,
+    build_task_contract_template,
+)
+
+PIPELINE_MANIFEST = build_pipeline_manifest(
+    pipeline_name=PPL_CONFIG["name"],
+    supported_tasks=["i2v"],
+    task_contracts={
+        "i2v": build_task_contract_template(
+            "i2v",
+            parameter_overrides={
+                "prompt": {
+                    "required": True,
+                    "description": "Positive guidance text prompt.",
+                },
+                "resolution": {
+                    "default": PPL_CONFIG["resolution"],
+                    "enum": ["480p", "720p"],
+                    "description": "User-facing output resolution.",
+                },
+            },
+            excluded_parameters=("aspect_ratio", "target_video_length"),
+        ),
+    },
+)
+```
+
+#### Contract Rules
+
+| Rule | Description |
+|------|-------------|
+| `supported_tasks` | Declare only tasks that `run_with_file()` can actually serve. |
+| `required_inputs` | Describe file-like inputs needed to select or validate a task, such as `first_image_path`. |
+| `parameters` | Include only user-facing request parameters that the server may default or validate. |
+| `excluded_parameters` | Remove generic template parameters that are not meaningful for this example. |
+| Internal tuning values | Keep them in `PPL_CONFIG` or in the implementation. Do not publish them in the contract. |
+
+#### User-Facing vs Internal Parameters
+
+The contract is intentionally not a dump of every pipeline knob. It is a description of what the caller needs to know.
+
+Include in the contract:
+
+- `prompt`
+- `negative_prompt`
+- `seed`
+- `resolution`
+- `output_path`
+- task-specific user inputs such as `output_format`
+
+Do not include in the contract:
+
+- `num_inference_steps`
+- fixed distillation settings
+- scheduler-specific internal constants
+- implementation-only toggles that callers should not change
+
+This keeps `GET /v1/service/metadata` clean and makes the API reflect only the supported user surface.
+
 **Example with special model paths:**
 
 ```python

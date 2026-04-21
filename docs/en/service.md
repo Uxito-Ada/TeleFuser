@@ -7,6 +7,7 @@ This guide covers the TeleFuser API server, CLI usage, and HTTP API reference.
 - [Quick Start](#quick-start)
 - [CLI Usage](#cli-usage)
 - [Server Configuration](#server-configuration)
+- [Service Metadata Guide](./service_metadata.md)
 - [HTTP API Reference](#http-api-reference)
 - [Client SDK](#client-sdk)
 - [Error Handling](#error-handling)
@@ -207,6 +208,95 @@ TELEFUSER_HOST=0.0.0.0
 TELEFUSER_RATE_LIMIT_ENABLED=true
 TELEFUSER_RATE_LIMIT_RPM=100
 ```
+
+### Pipeline Contract and Parameter Definitions
+
+The service does not infer pipeline capabilities from Python signatures alone. Instead, it loads an explicit
+pipeline contract from the example script when available.
+
+#### Contract Entry Points
+
+The server looks for one of the following in the pipeline file:
+
+- `get_pipeline_contract()`
+- `get_pipeline_manifest()`
+- `PIPELINE_CONTRACT`
+- `PIPELINE_MANIFEST`
+
+If none of them exist, the server falls back to a legacy compatibility contract based on the CLI `--task`.
+
+#### Contract Structure
+
+At minimum, a pipeline contract should declare:
+
+```python
+PIPELINE_MANIFEST = {
+  "contract_version": "v1",
+  "pipeline_name": "wan22_A14B_i2v_h100_distill",
+  "supported_tasks": ["i2v"],
+  "supported_media_types": ["video"],
+  "execution_mode": "serial_single_pipeline",
+  "effective_max_concurrent_tasks": 1,
+  "entrypoints": {
+    "get_pipeline": "get_pipeline",
+    "run_with_file": "run_with_file",
+  },
+  "task_contracts": {
+    "i2v": {
+      "media_type": "video",
+      "required_inputs": ["first_image_path"],
+      "optional_inputs": ["last_image_path"],
+      "parameters": {
+        "prompt": {
+          "type": "string",
+          "required": True,
+          "default": "",
+          "description": "Positive guidance text prompt.",
+        },
+        "resolution": {
+          "type": "string",
+          "required": False,
+          "default": "720p",
+          "enum": ["480p", "720p"],
+          "description": "Output resolution exposed by this example.",
+        },
+      },
+    },
+  },
+}
+```
+
+#### What Belongs in `task_contracts`
+
+Each task contract is split into two parts:
+
+- `required_inputs` and `optional_inputs`: file-like inputs that determine task eligibility and validation.
+- `parameters`: user-facing runtime parameters that the server may default and validate.
+
+Only parameters that users should know about belong in `parameters`. Internal implementation details such as
+`num_inference_steps`, fixed distillation settings, or pipeline-private tuning knobs should remain in `PPL_CONFIG`
+or inside `run()`/`run_with_file()`.
+
+#### How the Server Uses the Contract
+
+For `/v1/tasks/create`, `/v1/tasks/form`, and the OpenAI-compatible routes, the server processes requests in this order:
+
+1. Resolve or validate the task name against `supported_tasks`.
+2. Check file-style inputs against `required_inputs`.
+3. Apply defaults from `task_contracts[task]["parameters"]` for user-facing parameters that the caller omitted.
+4. Validate required user-facing parameters declared in the contract.
+5. Fall back to built-in request-model defaults only for fields not defined by the contract.
+
+This means contract defaults take precedence over generic API defaults when both exist.
+
+#### Service Metadata
+
+`GET /v1/service/metadata` exposes the active contract back to clients. This is the recommended way for a UI,
+gateway, or automation layer to discover which tasks are currently supported and which user-facing parameters are
+available for each task.
+
+For client-side form generation, task routing, and gateway integration patterns, see
+[Service Metadata Consumption Guide](./service_metadata.md).
 
 ---
 
