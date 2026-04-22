@@ -130,6 +130,7 @@ pipelines:
     script: qwen_image/qwen_image_t2i_h100.py
     gpu_count: 1
     output_type: image
+    pixel_diff_max: 0.08
 
   qwen_t2i_lora:
     script: qwen_image/qwen_image_t2i_lora_h100.py
@@ -168,53 +169,53 @@ pipelines:
   # longcat_video
   # ============================================================
 
-  #longcat_t2v:
-  #  script: longcat_video/longcat_text_to_video.py
-  #  gpu_count: 1
-  #  output_type: video
-  #  timeout_seconds: 3600
-  #  resolution: "480p"
-  #  ppl_config_overrides:
-  #    attn_impl: TORCH_SDPA
+  longcat_t2v:
+   script: longcat_video/longcat_text_to_video.py
+   gpu_count: 1
+   output_type: video
+   timeout_seconds: 3600
+   resolution: "480p"
+   ppl_config_overrides:
+     attn_impl: TORCH_SDPA
 
-  #longcat_i2v:
-  #  script: longcat_video/longcat_image_to_video.py
-  #  gpu_count: 1
-  #  output_type: video
-  #  input_image_path: examples/data/101235-video-720_0.png
-  #  timeout_seconds: 3600
-  #  resolution: "480p"
-  #  ppl_config_overrides:
-  #    attn_impl: TORCH_SDPA
+  longcat_i2v:
+   script: longcat_video/longcat_image_to_video.py
+   gpu_count: 1
+   output_type: video
+   input_image_path: examples/data/101235-video-720_0.png
+   timeout_seconds: 3600
+   resolution: "480p"
+   ppl_config_overrides:
+     attn_impl: TORCH_SDPA
 
-  #longcat_video_continue:
-  #  script: longcat_video/longcat_video_continue.py
-  #  gpu_count: 1
-  #  output_type: video
-  #  input_video_path: examples/data/dag.mp4
-  #  timeout_seconds: 3600
-  #  resolution: "480p"
-  #  ppl_config_overrides:
-  #    attn_impl: TORCH_SDPA
+  longcat_video_continue:
+   script: longcat_video/longcat_video_continue.py
+   gpu_count: 1
+   output_type: video
+   input_video_path: examples/data/dag.mp4
+   timeout_seconds: 3600
+   resolution: "480p"
+   ppl_config_overrides:
+     attn_impl: TORCH_SDPA
 
-  #longcat_video_unify:
-  #  script: longcat_video/longcat_video_unify.py
-  #  gpu_count: 1
-  #  output_type: video
-  #  input_image_path: examples/data/101235-video-720_0.png
-  #  timeout_seconds: 3600
-  #  resolution: "480p"
-  #  ppl_config_overrides:
-  #    attn_impl: TORCH_SDPA
+  longcat_video_unify:
+   script: longcat_video/longcat_video_unify.py
+   gpu_count: 1
+   output_type: video
+   input_image_path: examples/data/101235-video-720_0.png
+   timeout_seconds: 3600
+   resolution: "480p"
+   ppl_config_overrides:
+     attn_impl: TORCH_SDPA
 
-  #longcat_t2v_refine:
-  #  script: longcat_video/longcat_text_to_video_refine.py
-  #  gpu_count: 1
-  #  output_type: video
-  #  timeout_seconds: 7200
-  #  resolution: "480p"
-  #  ppl_config_overrides:
-  #    attn_impl: TORCH_SDPA
+  longcat_t2v_refine:
+   script: longcat_video/longcat_text_to_video_refine.py
+   gpu_count: 1
+   output_type: video
+   timeout_seconds: 7200
+   resolution: "480p"
+   ppl_config_overrides:
+     attn_impl: TORCH_SDPA
   # liveact 
   liveact_s2v_h100:
     script: liveact/liveact_s2v_h100.py

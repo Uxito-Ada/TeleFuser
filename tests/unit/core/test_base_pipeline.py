@@ -176,6 +176,15 @@ class TestTensor2Video:
         assert len(frames) == 2
         assert frames[0].size == (128, 128)
 
+    def test_tensor2video_with_resize_bfloat16(self, pipeline):
+        """Test tensor2video resize path handles bfloat16 inputs."""
+        tensor = torch.randn(3, 2, 64, 64, dtype=torch.bfloat16)
+
+        frames = pipeline.tensor2video(tensor, height=128, width=128)
+
+        assert len(frames) == 2
+        assert frames[0].size == (128, 128)
+
 
 class TestGenerateNoise:
     """Test generate_noise method."""

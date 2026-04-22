@@ -98,10 +98,10 @@ def main(aspect_ratio, gpu_num, prompt, negative_prompt, image_path, model_root,
     image = Image.open(image_path)
     pipeline = get_pipeline(gpu_num, model_root)
     # Warm up
-    images = run(pipeline, prompt, [image], aspect_ratio)
+    images = run(pipeline, prompt, [image], negative_prompt=negative_prompt)
     # Timing run
     s = time.time()
-    images = run(pipeline, prompt, [image], aspect_ratio)
+    images = run(pipeline, prompt, [image], negative_prompt=negative_prompt)
     print(f"pipe cost {time.time() - s} s")
     for i, image in enumerate(images):
         image.save(output.replace(".png", f"_{i}.png"))

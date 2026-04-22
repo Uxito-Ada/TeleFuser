@@ -356,9 +356,13 @@ class BasePipeline(ABC):
         if height is not None and width is not None:
             if height != frames.shape[2] or width != frames.shape[3]:
                 logger.info(f"Resizing video to {width}x{height}")
+                # Bicubic antialias resize does not support bf16 inputs in PyTorch.
+                resize_dtype = frames.dtype
+                resize_frames = frames.float() if frames.dtype == torch.bfloat16 else frames
                 frames = F.interpolate(
-                    frames, size=(height, width), mode="bicubic", align_corners=False, antialias=True
+                    resize_frames, size=(height, width), mode="bicubic", align_corners=False, antialias=True
                 )
+                frames = frames.to(resize_dtype)
         frames = rearrange(frames, "C T H W -> T H W C")
         frames = ((frames.float() + 1) * 127.5).clip(0, 255).cpu().numpy().astype(np.uint8)
         return [Image.fromarray(frame) for frame in frames]
