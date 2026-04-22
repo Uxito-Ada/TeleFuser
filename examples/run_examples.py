@@ -682,6 +682,8 @@ class PipelineConfig:
     negative_prompt: str | None = None
     resolution: str | None = None
     aspect_ratio: str | None = None
+    height: int | None = None
+    width: int | None = None
     input_image_path: str | None = None
     input_audio_path: str | None = None  # Audio input for LiveAct
     first_image_path: str | None = None
@@ -1059,6 +1061,8 @@ def _run_single(pipeline_key: str, config_path: str | None, output_dir: str | No
         "negative_prompt": ppl_cfg.negative_prompt,
         "resolution": ppl_cfg.resolution,
         "aspect_ratio": ppl_cfg.aspect_ratio,
+        "height": ppl_cfg.height,
+        "width": ppl_cfg.width,
         "input_image_path": ppl_cfg.input_image_path,
         "input_audio_path": ppl_cfg.input_audio_path,
         "first_image_path": ppl_cfg.first_image_path,
