@@ -13,10 +13,12 @@ from typing import Any
 from fastapi import FastAPI
 
 from telefuser.service_types import TaskType
+from telefuser.utils.logging import logger
 
 from .config import ServerConfig, server_config
 from .file_service import FileService
 from .pipeline_service import PipelineService
+from .stream_pipeline_service import StreamPipelineService
 from .task_manager import TaskManager
 from .task_service import MediaGenerationService
 
@@ -35,6 +37,7 @@ class ServiceContainer:
     task_manager: TaskManager
     file_service: FileService | None = None
     pipeline_service: PipelineService | None = None
+    stream_pipeline_service: StreamPipelineService | None = None
     media_service: MediaGenerationService | None = None
     _cache_dir: Path | None = field(default=None, repr=False)
 
@@ -46,6 +49,14 @@ class ServiceContainer:
     ) -> ServiceContainer:
         """Create a new service container with all dependencies."""
         config = config or server_config
+
+        if config.max_concurrent_tasks != config.effective_max_concurrent_tasks:
+            logger.warning(
+                "Configured max_concurrent_tasks=%s but effective task concurrency is fixed to %s "
+                "for a single ppl instance. Use max_queue_size to control queue admission.",
+                config.max_concurrent_tasks,
+                config.effective_max_concurrent_tasks,
+            )
 
         task_manager = TaskManager(
             max_queue_size=config.max_queue_size,
@@ -127,12 +138,28 @@ class ServiceContainer:
 
         return True
 
+    def initialize_stream_service(
+        self,
+        pipe_path: str,
+        skip_validation: bool = False,
+    ) -> bool:
+        """Initialize stream pipeline service (alternative to initialize_all)."""
+        self.stream_pipeline_service = StreamPipelineService(
+            security_level=self.config.security_level,
+        )
+        return self.stream_pipeline_service.start_service(
+            ppl_file=pipe_path,
+            skip_validation=skip_validation,
+        )
+
     def get_api_app(self, enable_rate_limit: bool = True) -> FastAPI:
         """Get FastAPI application with all services initialized."""
         from ..api.api_server import ApiServer
 
         api_server = ApiServer(
             max_queue_size=self.config.max_queue_size,
+            max_concurrent_tasks=self.config.effective_max_concurrent_tasks,
+            configured_max_concurrent_tasks=self.config.max_concurrent_tasks,
             task_manager=self.task_manager,
             enable_rate_limit=enable_rate_limit,
             enable_logging=False,
@@ -140,6 +167,9 @@ class ServiceContainer:
 
         if self.file_service and self.pipeline_service:
             api_server.initialize_services(self.file_service.cache_dir, self.pipeline_service)
+
+        if self.stream_pipeline_service:
+            api_server.initialize_stream_service(self.stream_pipeline_service)
 
         return api_server.get_app()
 
@@ -165,6 +195,10 @@ class ServiceContainer:
         if self.pipeline_service:
             await self.pipeline_service.aclose()
             self.pipeline_service = None
+
+        if self.stream_pipeline_service:
+            await self.stream_pipeline_service.aclose()
+            self.stream_pipeline_service = None
 
         self.media_service = None
 

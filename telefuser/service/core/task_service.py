@@ -10,6 +10,7 @@ from telefuser.utils.logging import logger
 from ..api.schema import TaskRequest, TaskResponse
 from ..media.media_base import AudioHandler, ImageHandler, VideoHandler
 from .file_service import FileService
+from .pipeline_contract import infer_media_type_for_task
 from .pipeline_service import PipelineService
 
 # Media handlers
@@ -82,7 +83,7 @@ class MediaGenerationService:
         task_data = await update_audio_path("audio_path", message, task_data)
 
         # Determine media type and set appropriate output path
-        media_type = MediaType.IMAGE if message.task in [TaskType.T2I, TaskType.I2I] else MediaType.VIDEO
+        media_type = infer_media_type_for_task(message.task)
         actual_save_path = self.file_service.get_output_path(message.output_path, media_type=media_type)
         task_data["output_path"] = str(actual_save_path)
 

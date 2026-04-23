@@ -7,6 +7,7 @@
 - [快速开始](#快速开始)
 - [CLI 命令行工具](#cli-命令行工具)
 - [服务器配置](#服务器配置)
+- [Service Metadata 指南](./service_metadata.md)
 - [HTTP API 参考](#http-api-参考)
 - [客户端 SDK](#客户端-sdk)
 - [错误处理](#错误处理)
@@ -207,6 +208,93 @@ TELEFUSER_HOST=0.0.0.0
 TELEFUSER_RATE_LIMIT_ENABLED=true
 TELEFUSER_RATE_LIMIT_RPM=100
 ```
+
+### Pipeline 契约与参数定义
+
+服务端不会只靠 Python 函数签名推断 pipeline 能力，而是优先从 example 脚本中加载显式的 pipeline contract。
+
+#### 契约入口
+
+服务端会按顺序查找以下定义：
+
+- `get_pipeline_contract()`
+- `get_pipeline_manifest()`
+- `PIPELINE_CONTRACT`
+- `PIPELINE_MANIFEST`
+
+如果都不存在，服务端会退回到基于 CLI `--task` 的 legacy 兼容契约。
+
+#### 契约结构
+
+一个最小可用的 pipeline contract 应至少声明：
+
+```python
+PIPELINE_MANIFEST = {
+  "contract_version": "v1",
+  "pipeline_name": "wan22_A14B_i2v_h100_distill",
+  "supported_tasks": ["i2v"],
+  "supported_media_types": ["video"],
+  "execution_mode": "serial_single_pipeline",
+  "effective_max_concurrent_tasks": 1,
+  "entrypoints": {
+    "get_pipeline": "get_pipeline",
+    "run_with_file": "run_with_file",
+  },
+  "task_contracts": {
+    "i2v": {
+      "media_type": "video",
+      "required_inputs": ["first_image_path"],
+      "optional_inputs": ["last_image_path"],
+      "parameters": {
+        "prompt": {
+          "type": "string",
+          "required": True,
+          "default": "",
+          "description": "正向提示词。",
+        },
+        "resolution": {
+          "type": "string",
+          "required": False,
+          "default": "720p",
+          "enum": ["480p", "720p"],
+          "description": "该 example 对外暴露的输出分辨率。",
+        },
+      },
+    },
+  },
+}
+```
+
+#### `task_contracts` 里应该放什么
+
+每个 task contract 可以分成两部分：
+
+- `required_inputs` 和 `optional_inputs`：决定任务推断和输入校验的文件类输入。
+- `parameters`：服务端会实际补默认值和校验的用户可见运行参数。
+
+只有用户需要知道、也应该能理解的参数才应放进 `parameters`。像 `num_inference_steps`、固定 distill 配置、
+pipeline 内部调优项这类实现细节，应该继续保留在 `PPL_CONFIG` 或 `run()`/`run_with_file()` 里，不应暴露为
+服务契约的一部分。
+
+#### 服务端如何使用契约
+
+对于 `/v1/tasks/create`、`/v1/tasks/form` 和 OpenAI 兼容路由，服务端大致按以下顺序处理请求：
+
+1. 根据 `supported_tasks` 校验或推断任务类型。
+2. 根据 `required_inputs` 校验文件类输入是否齐全。
+3. 对调用方未提供的用户可见参数，应用 `task_contracts[task]["parameters"]` 中的默认值。
+4. 校验 contract 中声明为必填的用户可见参数。
+5. 仅对 contract 未声明的字段，退回到内建请求模型默认值。
+
+也就是说，当 contract 和通用 API 默认值同时存在时，contract 默认值优先。
+
+#### 服务元数据
+
+`GET /v1/service/metadata` 会把当前生效的 contract 暴露给客户端。对 UI、网关或自动化层来说，这是发现当前
+支持哪些 task、以及每个 task 对外暴露哪些参数的推荐入口。
+
+如果需要前端动态表单生成、任务路由策略或网关接入方式，可继续参考
+[Service Metadata 消费指南](./service_metadata.md)。
 
 ---
 

@@ -26,15 +26,40 @@ class ServiceRoutes:
 
     async def get_status(self) -> dict:
         """Get service status."""
-        return self.api.task_manager.get_service_status()
+        status = self.api.task_manager.get_service_status()
+        status["execution_mode"] = "serial_single_pipeline"
+        status["effective_max_concurrent_tasks"] = self.api.max_concurrent_tasks
+        status["configured_max_concurrent_tasks"] = self.api.configured_max_concurrent_tasks
+        status.update(self._webrtc_session_stats())
+        return status
+
+    def _webrtc_session_stats(self) -> dict:
+        """Return WebRTC session stats if available."""
+        routes = self.api._webrtc_routes
+        if routes is None:
+            return {}
+        mgr = routes._session_manager
+        return {
+            "webrtc_active_sessions": mgr.active_session_count,
+            "webrtc_max_sessions": mgr._max_sessions,
+        }
 
     async def get_metadata(self) -> dict:
         """Get service metadata."""
-        assert self.api.inference_service is not None, "Inference service is not initialized"
-        metadata = self.api.inference_service.server_metadata()
-        metadata["supported_tasks"] = ["t2v", "i2v", "fl2v", "vc", "t2i", "i2i"]
-        metadata["supported_media_types"] = ["video", "image"]
-        return metadata
+        if self.api.inference_service is not None:
+            metadata = self.api.inference_service.server_metadata()
+            metadata["service_effective_max_concurrent_tasks"] = self.api.max_concurrent_tasks
+            metadata["service_configured_max_concurrent_tasks"] = self.api.configured_max_concurrent_tasks
+            metadata["max_queue_size"] = self.api.max_queue_size
+            return metadata
+
+        if self.api.stream_service is not None:
+            metadata = self.api.stream_service.server_metadata()
+            metadata["max_queue_size"] = self.api.max_queue_size
+            metadata.update(self._webrtc_session_stats())
+            return metadata
+
+        raise HTTPException(status_code=503, detail="No service is initialized")
 
     async def health_check(self) -> dict:
         """Health check endpoint for monitoring."""
@@ -48,6 +73,11 @@ class ServiceRoutes:
 
         if self.api.inference_service:
             status["pipeline_ready"] = self.api.inference_service.is_running
+
+        if self.api.stream_service:
+            status["stream_ready"] = self.api.stream_service.is_running
+            status["stream_mode"] = self.api.stream_service.stream_mode
+            status.update(self._webrtc_session_stats())
 
         return status
 

@@ -74,6 +74,10 @@ docs = [
     "ruff==0.9.4",
 ]
 
+webrtc = [
+    "aiortc>=1.9.0",
+]
+
 
 [project.urls]
 Homepage = "https://www.srdcloud.cn/code/49596/repoView/372413/codeFile/tree"

@@ -2,15 +2,17 @@ from __future__ import annotations
 
 from typing import Any
 
-from pydantic import BaseModel, Field
-
 from telefuser.service_types import AspectRatio, OutputFormat, StopTaskStatus, TaskStatus, TaskType
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from ..core.pipeline_contract import infer_media_type_for_task, validate_task_name_format
 from .utils import generate_task_id
 
 
 class TaskRequest(BaseModel):
     """Request model for media generation tasks."""
+
+    model_config = ConfigDict(extra="allow")
 
     task_id: str = Field(default_factory=generate_task_id, description="Task ID (auto-generated)")
     task: TaskType = Field(TaskType.T2V, description="t2v, i2v, fl2v, vc, t2i, i2i")
@@ -29,6 +31,19 @@ class TaskRequest(BaseModel):
         AspectRatio.RATIO_16_9, description="Allowed values: 16:9, 9:16, 4:3, 3:4, 1:1, 2:3, 3:2"
     )
     output_format: OutputFormat = Field(OutputFormat.PNG, description="Output image format (for t2i, i2i tasks)")
+
+    @field_validator("aspect_ratio")
+    @classmethod
+    def validate_aspect_ratio(cls: type[TaskRequest], v: str) -> str:
+        allowed = ["16:9", "9:16", "4:3", "3:4", "1:1", "2:3", "3:2"]
+        if v not in allowed:
+            raise ValueError(f"Invalid aspect ratio. Allowed values are: {', '.join(allowed)}")
+        return v
+
+    @field_validator("task")
+    @classmethod
+    def validate_task(cls: type[TaskRequest], v: str) -> str:
+        return validate_task_name_format(v)
 
     def __init__(self, **data) -> None:
         super().__init__(**data)

@@ -10,8 +10,22 @@ from datetime import datetime
 from typing import Any
 
 from telefuser.metrics import get_service_metrics
-from telefuser.service_types import TaskStatus
+from telefuser.service.core.pipeline_contract import infer_media_type_for_task
 from telefuser.utils.logging import logger
+
+
+class TaskStatus(Enum):
+    """Task status enumeration."""
+
+    PENDING = "pending"
+    PROCESSING = "processing"
+    STREAMING = "streaming"
+    COMPLETED = "completed"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+
+_ACTIVE_STATUSES = frozenset({TaskStatus.PENDING, TaskStatus.PROCESSING, TaskStatus.STREAMING})
 
 
 @dataclass
@@ -63,9 +77,7 @@ class TaskManager:
             if hasattr(message, "task_id") and message.task_id in self._tasks:
                 raise RuntimeError(f"Task ID {message.task_id} already exists")
 
-            active_tasks = sum(
-                1 for t in self._tasks.values() if t.status in [TaskStatus.PENDING, TaskStatus.PROCESSING]
-            )
+            active_tasks = sum(1 for t in self._tasks.values() if t.status in _ACTIVE_STATUSES)
             if active_tasks >= self.max_queue_size:
                 raise RuntimeError(f"Task queue is full (max {self.max_queue_size} tasks)")
 
@@ -88,16 +100,26 @@ class TaskManager:
 
     def start_task(self, task_id: str) -> TaskInfo:
         """Mark task as started."""
+        return self._transition_to(task_id, TaskStatus.PROCESSING, from_statuses=(TaskStatus.PENDING,))
+
+    def start_streaming(self, task_id: str) -> TaskInfo:
+        """Mark task as streaming (continuous output in progress)."""
+        return self._transition_to(
+            task_id, TaskStatus.STREAMING, from_statuses=(TaskStatus.PENDING, TaskStatus.PROCESSING)
+        )
+
+    def _transition_to(self, task_id: str, target: TaskStatus, from_statuses: tuple[TaskStatus, ...]) -> TaskInfo:
         with self._lock:
             if task_id not in self._tasks:
                 raise KeyError(f"Task {task_id} not found")
 
             task = self._tasks[task_id]
-            task.status = TaskStatus.PROCESSING
+            if task.status not in from_statuses:
+                return task
+
+            task.status = target
             task.start_time = datetime.now()
-
             self._tasks.move_to_end(task_id)
-
             return task
 
     def complete_task(self, task_id: str, output_path: str | None = None) -> None:
@@ -108,6 +130,10 @@ class TaskManager:
                 return
 
             task = self._tasks[task_id]
+            if task.status in [TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED]:
+                logger.info(f"Ignoring completion for task {task_id} in terminal state {task.status.value}")
+                return
+
             task.status = TaskStatus.COMPLETED
             task.end_time = datetime.now()
             if output_path:
@@ -127,6 +153,10 @@ class TaskManager:
                 return
 
             task = self._tasks[task_id]
+            if task.status in [TaskStatus.COMPLETED, TaskStatus.FAILED, TaskStatus.CANCELLED]:
+                logger.info(f"Ignoring failure for task {task_id} in terminal state {task.status.value}")
+                return
+
             task.status = TaskStatus.FAILED
             task.end_time = datetime.now()
             task.error = error
@@ -136,6 +166,8 @@ class TaskManager:
 
     def cancel_task(self, task_id: str) -> bool:
         """Cancel a pending or processing task."""
+        thread_to_join: threading.Thread | None = None
+
         with self._lock:
             if task_id not in self._tasks:
                 return False
@@ -153,15 +185,18 @@ class TaskManager:
             get_service_metrics().record_task_cancelled()
 
             if task.thread and task.thread.is_alive():
-                task.thread.join(timeout=self.cancel_timeout)
+                thread_to_join = task.thread
 
-            return True
+        if thread_to_join is not None:
+            thread_to_join.join(timeout=self.cancel_timeout)
+
+        return True
 
     def cancel_all_tasks(self) -> None:
         """Cancel all pending or processing tasks."""
         with self._lock:
             for task_id, task in list(self._tasks.items()):
-                if task.status in [TaskStatus.PENDING, TaskStatus.PROCESSING]:
+                if task.status in _ACTIVE_STATUSES:
                     self.cancel_task(task_id)
 
     def get_task(self, task_id: str) -> TaskInfo | None:
@@ -175,7 +210,7 @@ class TaskManager:
         if not task:
             return None
 
-        return {
+        status = {
             "task_id": task.task_id,
             "status": task.status.value,
             "start_time": task.start_time,
@@ -183,6 +218,8 @@ class TaskManager:
             "error": task.error,
             "output_path": task.output_path,
         }
+        status.update(self._serialize_task_message(task.message))
+        return status
 
     def get_all_tasks(self) -> dict[str, dict[str, Any] | None]:
         """Get all tasks as status dictionaries."""
@@ -192,7 +229,7 @@ class TaskManager:
     def get_active_task_count(self) -> int:
         """Get count of pending and processing tasks."""
         with self._lock:
-            return sum(1 for t in self._tasks.values() if t.status in [TaskStatus.PENDING, TaskStatus.PROCESSING])
+            return sum(1 for t in self._tasks.values() if t.status in _ACTIVE_STATUSES)
 
     def get_pending_task_count(self) -> int:
         """Get count of pending tasks."""
@@ -237,7 +274,11 @@ class TaskManager:
     def get_service_status(self) -> dict[str, Any]:
         """Get overall service status."""
         with self._lock:
-            active_tasks = [task_id for task_id, task in self._tasks.items() if task.status == TaskStatus.PROCESSING]
+            active_tasks = [
+                task_id
+                for task_id, task in self._tasks.items()
+                if task.status in (TaskStatus.PROCESSING, TaskStatus.STREAMING)
+            ]
 
             pending_count = sum(1 for t in self._tasks.values() if t.status == TaskStatus.PENDING)
 
@@ -271,3 +312,32 @@ class TaskManager:
         for task_id, _ in completed_tasks[:remove_count]:
             del self._tasks[task_id]
             logger.debug(f"Cleaned up old task: {task_id}")
+
+    def _serialize_task_message(self, message: Any) -> dict[str, Any]:
+        """Extract stable task metadata needed by server APIs from the original request object."""
+        if message is None:
+            return {}
+
+        data: dict[str, Any] = {}
+        for field_name in (
+            "task",
+            "prompt",
+            "negative_prompt",
+            "resolution",
+            "target_video_length",
+            "aspect_ratio",
+            "output_format",
+            "model",
+            "first_image_path",
+            "last_image_path",
+            "ref_video_path",
+        ):
+            value = getattr(message, field_name, None)
+            if value not in (None, ""):
+                data[field_name] = value
+
+        task_name = data.get("task") or getattr(message, "task", None)
+        if task_name:
+            data["media_type"] = infer_media_type_for_task(task_name)
+
+        return data

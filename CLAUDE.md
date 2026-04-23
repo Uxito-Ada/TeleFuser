@@ -134,6 +134,8 @@ TeleFuser's model follows a strict layered architecture for operations:
 | Parallel | [docs/en/parallel.md](docs/en/parallel.md) | [docs/zh/parallel.md](docs/zh/parallel.md) |
 | Profiler | [docs/en/profiler.md](docs/en/profiler.md) | [docs/zh/profiler.md](docs/zh/profiler.md) |
 | Service | [docs/en/service.md](docs/en/service.md) | [docs/zh/service.md](docs/zh/service.md) |
+| Service Metadata | [docs/en/service_metadata.md](docs/en/service_metadata.md) | [docs/zh/service_metadata.md](docs/zh/service_metadata.md) |
+| Stream Server | [docs/en/stream_server.md](docs/en/stream_server.md) | [docs/zh/stream_server.md](docs/zh/stream_server.md) |
 | Testing | [docs/en/testing.md](docs/en/testing.md) | [docs/zh/testing.md](docs/zh/testing.md) |
 | torch.compile Compatibility | [docs/en/torch_compile_compatibility.md](docs/en/torch_compile_compatibility.md) | [docs/zh/torch_compile_compatibility.md](docs/zh/torch_compile_compatibility.md) |
 
@@ -195,6 +197,19 @@ Located in `telefuser/kernel/triton/`:
 - Keep this file synchronized with codebase changes
 - See `CONTRIBUTING.md` for contribution guidelines
 - Update CLAUDE.md if needed (new patterns, new modules, architecture changes)
+
+## Interaction Workflow (MANDATORY)
+
+1. **Never end the conversation silently.** When work is completed or there are questions that need clarification, you MUST call the AskUserQuestion tool to get further instructions instead of ending the conversation directly.
+
+2. **Propose before executing.** Every time the user raises a new requirement, you MUST first propose a modification plan and communicate with the user for confirmation before executing the plan.
+
+3. **Maintain a TODO document.** During communication with the user, maintain a TODO task list (using the TaskCreate/TaskUpdate tools) and keep it updated in real time as tasks are added, modified, or completed.
+
+4. **Confirm at every stage.** After each call to the AskUserQuestion tool and after the user raises a new requirement:
+   - First, formulate a plan and confirm it with the user.
+   - After executing the plan, confirm the results with the user.
+   - Continue this loop until the user explicitly agrees to exit.
 
 ## Task Completion Checklist
 
