@@ -10,12 +10,14 @@ from urllib.parse import urlparse
 
 import httpx
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 
 from telefuser.utils.logging import logger
 
 from ..core.file_service import FileService
 from ..core.pipeline_service import PipelineService
+from ..core.stream_pipeline_service import StreamPipelineService
 from ..core.task_manager import TaskManager, TaskStatus
 from ..core.task_processor import AsyncTaskProcessor
 from ..core.task_service import MediaGenerationService
@@ -51,6 +53,8 @@ class ApiServer:
         )
         self.file_service: FileService | None = None
         self.inference_service: PipelineService | None = None
+        self.stream_service: StreamPipelineService | None = None
+        self._webrtc_routes: object | None = None
         self.media_service: MediaGenerationService | None = None
         self.max_queue_size = max_queue_size
         self.max_concurrent_tasks = max_concurrent_tasks
@@ -82,6 +86,17 @@ class ApiServer:
         self.app.include_router(tasks_router)
         self.app.include_router(files_router)
         self.app.include_router(service_router)
+
+        stream_router = routers.setup_stream_routes(self)
+        self.app.include_router(stream_router)
+
+        if routers.setup_webrtc_routes is not None:
+            try:
+                webrtc_router = routers.setup_webrtc_routes(self)
+                self.app.include_router(webrtc_router)
+                logger.info("WebRTC routes enabled at /v1/stream/webrtc")
+            except Exception as e:
+                logger.info(f"WebRTC routes not available: {e}")
 
         if self.enable_openai_api:
             try:
@@ -262,10 +277,26 @@ class ApiServer:
             max_concurrent=self.max_concurrent_tasks,
         )
 
+    def initialize_stream_service(self, stream_service: StreamPipelineService) -> None:
+        """Initialize stream pipeline service for stream-mode endpoints."""
+        self.stream_service = stream_service
+        self.app.add_middleware(
+            CORSMiddleware,
+            allow_origins=["*"],
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+
     async def cleanup(self) -> None:
         """Cleanup resources and stop processing workers."""
         if self.task_processor is not None:
             await self.task_processor.stop()
+
+        if self.stream_service is not None:
+            await self.stream_service.aclose()
+
+        if self._webrtc_routes is not None:
+            await self._webrtc_routes.cleanup()
 
         if self.file_service:
             cleanup = getattr(self.file_service, "cleanup", None)

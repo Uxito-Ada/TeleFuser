@@ -17,6 +17,7 @@ from telefuser.utils.logging import logger
 from .config import ServerConfig, server_config
 from .file_service import FileService
 from .pipeline_service import PipelineService
+from .stream_pipeline_service import StreamPipelineService
 from .task_manager import TaskManager
 from .task_service import MediaGenerationService
 
@@ -35,6 +36,7 @@ class ServiceContainer:
     task_manager: TaskManager
     file_service: FileService | None = None
     pipeline_service: PipelineService | None = None
+    stream_pipeline_service: StreamPipelineService | None = None
     media_service: MediaGenerationService | None = None
     _cache_dir: Path | None = field(default=None, repr=False)
 
@@ -131,6 +133,20 @@ class ServiceContainer:
 
         return True
 
+    def initialize_stream_service(
+        self,
+        pipe_path: str,
+        skip_validation: bool = False,
+    ) -> bool:
+        """Initialize stream pipeline service (alternative to initialize_all)."""
+        self.stream_pipeline_service = StreamPipelineService(
+            security_level=self.config.security_level,
+        )
+        return self.stream_pipeline_service.start_service(
+            ppl_file=pipe_path,
+            skip_validation=skip_validation,
+        )
+
     def get_api_app(self, enable_rate_limit: bool = True) -> FastAPI:
         """Get FastAPI application with all services initialized."""
         from ..api.api_server import ApiServer
@@ -146,6 +162,9 @@ class ServiceContainer:
 
         if self.file_service and self.pipeline_service:
             api_server.initialize_services(self.file_service.cache_dir, self.pipeline_service)
+
+        if self.stream_pipeline_service:
+            api_server.initialize_stream_service(self.stream_pipeline_service)
 
         return api_server.get_app()
 
@@ -171,6 +190,10 @@ class ServiceContainer:
         if self.pipeline_service:
             await self.pipeline_service.aclose()
             self.pipeline_service = None
+
+        if self.stream_pipeline_service:
+            await self.stream_pipeline_service.aclose()
+            self.stream_pipeline_service = None
 
         self.media_service = None
 

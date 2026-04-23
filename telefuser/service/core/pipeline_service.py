@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-import hashlib
 import json
 import threading
-from pathlib import Path
 from types import ModuleType
 from typing import Any
 
@@ -18,10 +16,10 @@ from ..security.security_validator import (
     PipelineSecurityValidator,
     SecurityError,
     SecurityLevel,
-    validate_with_report,
 )
 from .config import server_config
 from .pipeline_contract import load_pipeline_contract
+from .pipeline_loader import load_pipeline_module, unload_pipeline_module, validate_pipeline_file
 from .pipeline_runner import PipelineRunner
 
 mp.set_start_method("spawn", force=True)
@@ -47,6 +45,7 @@ class PipelineService:
         self.parallelism: int | None = None
 
         self._module: ModuleType | None = None
+        self._module_name: str | None = None
         self._runner: PipelineRunner | None = None
         self._contract = None
         self._declared_contract = False
@@ -60,71 +59,12 @@ class PipelineService:
         logger.info(f"PipelineService initialized with security_level={self.security_level.name}")
 
     def _load_pipeline_module(self, ppl_file: str) -> ModuleType:
-        """Load pipeline module from file path with a stable unique module name.
-
-        Using a unique module name avoids collisions when importing different pipeline files with the same basename.
-        """
-        import importlib.util
-        import sys
-
-        resolved = str(Path(ppl_file).expanduser().resolve())
-        module_hash = hashlib.md5(resolved.encode("utf-8")).hexdigest()[:12]
-        module_name = f"telefuser_ppl_{module_hash}"
-
-        spec = importlib.util.spec_from_file_location(module_name, resolved)
-        if spec is None or spec.loader is None:
-            raise RuntimeError(f"Failed to load module spec for {ppl_file}")
-
-        module = importlib.util.module_from_spec(spec)
-        sys.modules[module_name] = module
-        spec.loader.exec_module(module)
+        module, name = load_pipeline_module(ppl_file, prefix="telefuser_ppl")
+        self._module_name = name
         return module
 
     def _validate_pipeline_file(self, ppl_file: str) -> bool:
-        """Validate pipeline file for security issues."""
-        if self.security_level == SecurityLevel.NONE:
-            logger.warning("Security validation is disabled (SecurityLevel.NONE)")
-            return True
-
-        try:
-            logger.info(f"Validating pipeline file: {ppl_file}")
-            result = self.security_validator.validate_file(ppl_file)
-
-            if result.is_safe:
-                logger.info(f"Pipeline file '{ppl_file}' passed security validation")
-                if result.warnings:
-                    logger.warning(f"  {len(result.warnings)} warnings found")
-                    for w in result.warnings[:3]:
-                        logger.warning(f"    Line {w.line_number}: {w.description}")
-                return True
-            else:
-                report = validate_with_report(ppl_file)
-                logger.error(f"Security validation failed:\n{report}")
-
-                critical_count = sum(1 for v in result.violations if v.severity == "critical")
-                if critical_count > 0:
-                    raise SecurityError(
-                        f"Pipeline file contains {critical_count} critical security violations. "
-                        f"Execution blocked. Run with detailed report for more info."
-                    )
-
-                if getattr(server_config, "allow_unsafe_pipelines", False):
-                    logger.warning("Allowing unsafe pipeline due to server_config.allow_unsafe_pipelines=True")
-                    return True
-                else:
-                    raise SecurityError(
-                        f"Pipeline file failed security validation with {len(result.violations)} violations. "
-                        f"Set security_level=SecurityLevel.NONE to bypass, "
-                        f"or server_config.allow_unsafe_pipelines=True to allow with warnings."
-                    )
-
-        except SecurityError:
-            raise
-        except Exception as e:
-            logger.error(f"Unexpected error during security validation: {e}")
-            if getattr(server_config, "strict_validation", True):
-                raise SecurityError(f"Validation failed with error: {e}")
-            return True
+        return validate_pipeline_file(ppl_file, self.security_level, self.security_validator)
 
     def start_pipeline(self, ppl_file: str, parallelism: int, task: str, skip_validation: bool = False) -> bool:
         """Start the pipeline with security validation."""
@@ -192,7 +132,9 @@ class PipelineService:
             logger.warning(f"Error during pipeline shutdown: {e}")
         finally:
             self._runner = None
+            unload_pipeline_module(self._module_name)
             self._module = None
+            self._module_name = None
             self._contract = None
             self._declared_contract = False
 

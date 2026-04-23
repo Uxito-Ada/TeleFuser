@@ -94,7 +94,7 @@ class RateLimitMiddleware(BaseHTTPMiddleware):
         """Process request with rate limiting."""
         request_id = str(uuid.uuid4())[:8]
 
-        if request.url.path in self.exempt_paths:
+        if request.method == "OPTIONS" or request.url.path in self.exempt_paths:
             response = await call_next(request)
             response.headers["X-Request-ID"] = request_id
             return response

@@ -121,6 +121,17 @@ class ServerConfig(BaseSettings):
         default="auto", description="GPU platform for metrics collection"
     )
 
+    # Stream settings
+    stream_ws_max_connections: int = Field(
+        default=10, ge=1, le=1000, description="Maximum concurrent WebSocket connections"
+    )
+
+    stream_chunk_timeout: float = Field(
+        default=30.0, ge=1.0, le=300.0, description="Timeout in seconds waiting for a stream chunk"
+    )
+
+    webrtc_max_sessions: int = Field(default=10, ge=1, le=100, description="Maximum concurrent WebRTC sessions")
+
     @field_validator("port")
     @classmethod
     def validate_port(cls: type[ServerConfig], v: int) -> int:

@@ -20,9 +20,13 @@ class TaskStatus(Enum):
 
     PENDING = "pending"
     PROCESSING = "processing"
+    STREAMING = "streaming"
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+
+
+_ACTIVE_STATUSES = frozenset({TaskStatus.PENDING, TaskStatus.PROCESSING, TaskStatus.STREAMING})
 
 
 @dataclass
@@ -74,9 +78,7 @@ class TaskManager:
             if hasattr(message, "task_id") and message.task_id in self._tasks:
                 raise RuntimeError(f"Task ID {message.task_id} already exists")
 
-            active_tasks = sum(
-                1 for t in self._tasks.values() if t.status in [TaskStatus.PENDING, TaskStatus.PROCESSING]
-            )
+            active_tasks = sum(1 for t in self._tasks.values() if t.status in _ACTIVE_STATUSES)
             if active_tasks >= self.max_queue_size:
                 raise RuntimeError(f"Task queue is full (max {self.max_queue_size} tasks)")
 
@@ -99,19 +101,26 @@ class TaskManager:
 
     def start_task(self, task_id: str) -> TaskInfo:
         """Mark task as started."""
+        return self._transition_to(task_id, TaskStatus.PROCESSING, from_statuses=(TaskStatus.PENDING,))
+
+    def start_streaming(self, task_id: str) -> TaskInfo:
+        """Mark task as streaming (continuous output in progress)."""
+        return self._transition_to(
+            task_id, TaskStatus.STREAMING, from_statuses=(TaskStatus.PENDING, TaskStatus.PROCESSING)
+        )
+
+    def _transition_to(self, task_id: str, target: TaskStatus, from_statuses: tuple[TaskStatus, ...]) -> TaskInfo:
         with self._lock:
             if task_id not in self._tasks:
                 raise KeyError(f"Task {task_id} not found")
 
             task = self._tasks[task_id]
-            if task.status != TaskStatus.PENDING:
+            if task.status not in from_statuses:
                 return task
 
-            task.status = TaskStatus.PROCESSING
+            task.status = target
             task.start_time = datetime.now()
-
             self._tasks.move_to_end(task_id)
-
             return task
 
     def complete_task(self, task_id: str, output_path: str | None = None) -> None:
@@ -188,7 +197,7 @@ class TaskManager:
         """Cancel all pending or processing tasks."""
         with self._lock:
             for task_id, task in list(self._tasks.items()):
-                if task.status in [TaskStatus.PENDING, TaskStatus.PROCESSING]:
+                if task.status in _ACTIVE_STATUSES:
                     self.cancel_task(task_id)
 
     def get_task(self, task_id: str) -> TaskInfo | None:
@@ -221,7 +230,7 @@ class TaskManager:
     def get_active_task_count(self) -> int:
         """Get count of pending and processing tasks."""
         with self._lock:
-            return sum(1 for t in self._tasks.values() if t.status in [TaskStatus.PENDING, TaskStatus.PROCESSING])
+            return sum(1 for t in self._tasks.values() if t.status in _ACTIVE_STATUSES)
 
     def get_pending_task_count(self) -> int:
         """Get count of pending tasks."""
@@ -266,7 +275,11 @@ class TaskManager:
     def get_service_status(self) -> dict[str, Any]:
         """Get overall service status."""
         with self._lock:
-            active_tasks = [task_id for task_id, task in self._tasks.items() if task.status == TaskStatus.PROCESSING]
+            active_tasks = [
+                task_id
+                for task_id, task in self._tasks.items()
+                if task.status in (TaskStatus.PROCESSING, TaskStatus.STREAMING)
+            ]
 
             pending_count = sum(1 for t in self._tasks.values() if t.status == TaskStatus.PENDING)
 
