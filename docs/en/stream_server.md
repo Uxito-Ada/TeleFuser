@@ -1,6 +1,6 @@
 # TeleFuser Stream Server Guide
 
-This guide covers TeleFuser's real-time stream server, which delivers continuous video (and optional audio) over **WebRTC** or **WebSocket** connections — as opposed to the batch request-response mode of `telefuser serve`.
+This guide covers TeleFuser's real-time stream server, which delivers continuous video (and optional audio) over **WebRTC** connections — as opposed to the batch request-response mode of `telefuser serve`.
 
 ---
 
@@ -23,12 +23,12 @@ Open `http://localhost:8090` in a browser, type a prompt, and click **Connect** 
 
 ## Stream Modes
 
-TeleFuser stream server supports two interaction modes:
+TeleFuser stream server supports two interaction modes, both available over WebRTC:
 
 | Mode | Transport | Direction | Use Case |
 |------|-----------|-----------|----------|
-| **Server Push** | WebRTC | Server → Client | Real-time preview, text-to-video streaming |
-| **Bidirectional** | WebSocket | Client ↔ Server | Interactive generation, speech-to-video |
+| **Server Push** | WebRTC (RTP) | Server → Client | Real-time preview, text-to-video streaming |
+| **Bidirectional** | WebRTC (RTP + DataChannel) | Client ↔ Server | Interactive generation, keyboard/camera control, speech-to-video |
 
 ### Server Push (WebRTC)
 
@@ -51,27 +51,43 @@ Client                          Server
 
 The pipeline's `serve()` method yields chunks containing JPEG-encoded frames. The WebRTC layer decodes them into `av.VideoFrame` objects and streams them to the browser via RTP at the target frame rate.
 
-### Bidirectional (WebSocket)
+### Bidirectional (WebRTC)
 
 ```
 Client                          Server
   │                               │
-  │  POST /v1/stream/sessions     │
-  │  (task + config)              │
+  │  pc.createDataChannel("telefuser")
+  │  pc.addTransceiver("video", recvonly)
+  │  (optionally add camera/mic tracks)
+  │                               │
+  │  POST /v1/stream/webrtc/offer │
+  │  (SDP offer + config)         │
   │──────────────────────────────►│
-  │  { session_id, status }       │
+  │                               │  create_session(config)
+  │                               │  pull_chunks(session_id)
+  │  SDP answer                   │  start ChunkRouter
   │◄──────────────────────────────│
   │                               │
-  │  WS /v1/stream/ws/{session_id}│
-  │◄════════════════════════════►│
-  │  send: input chunks           │
-  │  recv: output chunks          │
+  │  ──── DataChannel JSON ─────► │  push_chunk(session_id, data)
+  │  ◄──── RTP video frames ────  │  ChunkRouter → FrameGeneratorTrack
+  │  ◄──── RTP audio frames ────  │  ChunkRouter → AudioGeneratorTrack
+  │  ◄──── DataChannel JSON ────  │  ChunkRouter → metadata
   │                               │
-  │  DELETE /v1/stream/sessions/{}│
-  │──────────────────────────────►│  cleanup
+  │  ──── Media tracks (opt) ───► │  IncomingVideoRelay / AudioRelay
+  │                               │  → push_chunk(session_id, frames)
+  │                               │
+  │  {"type": "stop"}             │
+  │  or DELETE /v1/stream/webrtc/{}│
+  │──────────────────────────────►│  close_session + cleanup
 ```
 
-The client creates a session, connects a WebSocket, and pushes input chunks (e.g., audio frames for speech-to-video). The server pushes output chunks back over the same WebSocket.
+The client **must** create a DataChannel named `"telefuser"` before generating the SDP offer. The server reuses that single channel for receiving control input and sending metadata output. Video and audio are transported over RTP media tracks in both directions.
+
+**ChunkRouter** is the server-side fan-out adapter that consumes the pipeline's `pull_chunks()` generator exactly once and dispatches:
+
+- `frames_b64` → decoded JPEG → `av.VideoFrame` → pushed to `FrameGeneratorTrack` (RTP video)
+- `audio_b64` → decoded PCM16 → fed to `AudioGeneratorTrack` (RTP audio)
+- Remaining metadata → serialized as `StreamChunkMessage` JSON → sent over DataChannel
 
 ---
 
@@ -204,16 +220,16 @@ Server-push chunks should contain the following fields:
 
 | Endpoint | Method | Mode | Description |
 |----------|--------|------|-------------|
-| `/v1/stream/webrtc/offer` | POST | Server Push | WebRTC SDP offer/answer exchange |
-| `/v1/stream/webrtc/{session_id}` | DELETE | Server Push | Close WebRTC session |
-| `/v1/stream/sessions` | POST | Bidirectional | Create WebSocket session |
-| `/v1/stream/ws/{session_id}` | WS | Bidirectional | WebSocket duplex connection |
-| `/v1/stream/sessions/{session_id}` | DELETE | Bidirectional | Close WebSocket session |
-| `/v1/stream/sessions/{session_id}/status` | GET | Bidirectional | Get session status |
+| `/v1/stream/webrtc/offer` | POST | Both | WebRTC SDP offer/answer exchange |
+| `/v1/stream/webrtc/{session_id}` | DELETE | Both | Close WebRTC session |
+| `/v1/stream/sessions/{session_id}` | DELETE | Both | Close session (pipeline + WebRTC) |
+| `/v1/stream/sessions/{session_id}/status` | GET | Both | Get session status |
 
 ### WebRTC: SDP Offer
 
 **POST** `/v1/stream/webrtc/offer`
+
+This endpoint serves both **server-push** and **bidirectional** modes. The server auto-detects the mode based on the pipeline's service type.
 
 Request:
 
@@ -221,12 +237,26 @@ Request:
 {
   "sdp": "<SDP offer string>",
   "type": "offer",
+  "session_id": "optional-uuid",
   "task": "t2v",
   "prompt": "A sunset over the ocean",
   "fps": 24,
-  "duration_s": 10
+  "duration_s": 10,
+  "config": {}
 }
 ```
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `sdp` | `str` | Yes | SDP offer from browser |
+| `type` | `str` | Yes | SDP type (usually `"offer"`) |
+| `session_id` | `str` | No | Custom session ID (auto-generated if omitted) |
+| `task` | `str` | Yes | Task type (e.g. `t2v`, `i2v`, `bidirectional`) |
+| `prompt` | `str` | No | Input prompt |
+| `fps` | `int` | No | Target video FPS (default: 24) |
+| `config` | `dict` | No | Extra config passed to `BidirectionalService.create_session()` |
+
+> Additional fields are allowed (`"extra": "allow"`) and forwarded to the pipeline.
 
 Response (`200 OK`):
 
@@ -258,53 +288,43 @@ Response (`200 OK`):
 }
 ```
 
-### WebSocket: Create Session
+### WebRTC: DataChannel Protocol (Bidirectional)
 
-**POST** `/v1/stream/sessions`
+In bidirectional mode, the client-created `"telefuser"` DataChannel carries JSON messages in both directions.
 
-Request:
+**Client → Server messages:**
 
 ```json
-{
-  "task": "s2v",
-  "config": {"fps": 24}
-}
+// Control input (e.g., keyboard, prompt)
+{"type": "control", "key": "ArrowUp", "action": "press"}
+{"type": "control", "prompt": "new prompt text"}
+
+// Stop session
+{"type": "stop"}
 ```
 
-Response (`200 OK`):
+**Server → Client messages:**
 
 ```json
-{
-  "session_id": "def456",
-  "stream_mode": "bidirectional",
-  "status": "created"
-}
-```
-
-### WebSocket: Duplex Connection
-
-**WS** `/v1/stream/ws/{session_id}`
-
-After creating a session, connect a WebSocket. Send JSON messages as input chunks, receive JSON output chunks:
-
-```json
-// Received output chunk
+// Output chunk metadata (media sent separately via RTP)
 {
   "type": "chunk",
-  "session_id": "def456",
+  "session_id": "abc123",
   "index": 0,
-  "data": { ... },
+  "data": {"type": "chunk", "index": 0, "fps": 24, "timestamp": 1714000000.0},
   "timestamp": 1714000000.0
 }
 
-// Final message
+// Generation complete
 {
   "type": "done",
-  "session_id": "def456",
-  "total_chunks": 10,
+  "session_id": "abc123",
+  "total_chunks": 240,
   "timestamp": 1714000010.0
 }
 ```
+
+> The control message format is pipeline-defined. The examples above show the convention used by `ArrowOverlayService`. Your pipeline's `push_chunk()` receives whatever JSON the client sends.
 
 ### Stream-Specific Health Fields
 
@@ -316,6 +336,8 @@ After creating a session, connect a WebSocket. Send JSON messages as input chunk
   "stream_ready": true,
   "stream_mode": "server_push",
   "webrtc_active_sessions": 1,
+  "webrtc_server_push_sessions": 1,
+  "webrtc_bidirectional_sessions": 0,
   "webrtc_max_sessions": 10
 }
 ```
@@ -332,6 +354,8 @@ After creating a session, connect a WebSocket. Send JSON messages as input chunk
   "security_level": "STRICT",
   "runner": "StreamPipelineService",
   "webrtc_active_sessions": 0,
+  "webrtc_server_push_sessions": 0,
+  "webrtc_bidirectional_sessions": 0,
   "webrtc_max_sessions": 10
 }
 ```
@@ -340,7 +364,7 @@ After creating a session, connect a WebSocket. Send JSON messages as input chunk
 
 ## Client Integration
 
-### WebRTC (JavaScript)
+### WebRTC: Server Push (JavaScript)
 
 Minimal browser client for server-push mode:
 
@@ -379,38 +403,63 @@ pc.ontrack = (event) => {
 };
 ```
 
-### WebSocket (Python)
+### WebRTC: Bidirectional (JavaScript)
 
-```python
-import asyncio
-import json
-import websockets
-import httpx
+Full-duplex client with DataChannel for control and optional camera/mic input:
 
-async def stream_bidirectional():
-    # 1. Create session
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(
-            "http://localhost:8088/v1/stream/sessions",
-            json={"task": "s2v", "config": {"fps": 24}},
-        )
-        session_id = resp.json()["session_id"]
+```javascript
+const pc = new RTCPeerConnection();
 
-    # 2. Connect WebSocket
-    async with websockets.connect(
-        f"ws://localhost:8088/v1/stream/ws/{session_id}"
-    ) as ws:
-        # Send input
-        await ws.send(json.dumps({"type": "audio", "data": "..."}))
+// 1. Client MUST create DataChannel before generating the offer
+const dc = pc.createDataChannel("telefuser");
+dc.onopen = () => {
+  // Send control messages after channel opens
+  dc.send(JSON.stringify({ type: "control", key: "ArrowUp", action: "press" }));
+};
+dc.onmessage = (evt) => {
+  const msg = JSON.parse(evt.data);
+  if (msg.type === "done") console.log("Generation complete:", msg.total_chunks, "chunks");
+};
 
-        # Receive output
-        async for msg in ws:
-            chunk = json.loads(msg)
-            if chunk["type"] == "done":
-                break
-            print(f"Chunk {chunk['index']}")
+// 2. Optionally send camera/mic to the server
+// const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+// stream.getTracks().forEach(t => pc.addTrack(t, stream));
 
-asyncio.run(stream_bidirectional())
+// 3. Receive server output video/audio
+pc.addTransceiver("video", { direction: "recvonly" });
+pc.addTransceiver("audio", { direction: "recvonly" });
+
+pc.ontrack = (evt) => {
+  if (evt.track.kind === "video") {
+    document.getElementById("video").srcObject = evt.streams[0];
+  }
+};
+
+// 4. SDP exchange (same endpoint as server-push)
+const offer = await pc.createOffer();
+await pc.setLocalDescription(offer);
+
+const resp = await fetch("http://localhost:8088/v1/stream/webrtc/offer", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    sdp: pc.localDescription.sdp,
+    type: pc.localDescription.type,
+    task: "bidirectional",
+    prompt: "A dog running",
+    config: { fps: 24 },
+  }),
+});
+
+const answer = await resp.json();
+await pc.setRemoteDescription(new RTCSessionDescription({
+  sdp: answer.sdp,
+  type: answer.type,
+}));
+
+// 5. Stop session
+// dc.send(JSON.stringify({ type: "stop" }));
+// await fetch(`http://localhost:8088/v1/stream/webrtc/${answer.session_id}`, { method: "DELETE" });
 ```
 
 ### Gradio UI
@@ -454,6 +503,37 @@ python examples/stream_server/webrtc_client_demo.py --server-url http://localhos
 
 Opens a browser page with video player, prompt input, and connect/stop/unmute buttons.
 
+### Arrow Overlay Service (Bidirectional)
+
+`examples/stream_server/stream_arrow_overlay.py` — A bidirectional pipeline that loads a video and overlays a D-pad HUD based on keyboard input:
+
+- Implements `BidirectionalService` protocol with session state management
+- `push_chunk()` receives `{"type": "control", "key": "ArrowUp", "action": "press"}` and updates `pressed_keys`
+- `pull_chunks()` yields video frames with D-pad overlay drawn based on `pressed_keys`
+- Loops through video frames indefinitely until session closes
+
+```bash
+# Start the server
+telefuser stream-serve examples/stream_server/stream_arrow_overlay.py -p 8088 --skip-validation
+
+# Start the client (opens browser at localhost:8092)
+python examples/stream_server/webrtc_arrow_overlay_demo.py --server-url http://localhost:8088
+```
+
+Press arrow keys in the browser to see the D-pad overlay respond in real time.
+
+### Bidirectional Client Demo
+
+`examples/stream_server/webrtc_bidirectional_demo.py` — A general-purpose bidirectional WebRTC client with:
+
+- DataChannel for sending prompts and control messages
+- Optional camera and microphone input via media tracks
+- Server output video player and DataChannel message log
+
+```bash
+python examples/stream_server/webrtc_bidirectional_demo.py --server-url http://localhost:8088
+```
+
 ---
 
 ## Configuration
@@ -463,7 +543,6 @@ Opens a browser page with video player, prompt input, and connect/stop/unmute bu
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `TELEFUSER_WEBRTC_MAX_SESSIONS` | `10` | Maximum concurrent WebRTC sessions (1-100) |
-| `TELEFUSER_STREAM_WS_MAX_CONNECTIONS` | `10` | Maximum concurrent WebSocket connections (1-1000) |
 | `TELEFUSER_STUN_SERVERS` | `["stun:stun.l.google.com:19302"]` | STUN server URLs (JSON array) |
 | `TELEFUSER_TURN_SERVER` | `None` | TURN server URL (e.g. `turn:your-domain.com:3478`) |
 | `TELEFUSER_TURN_USERNAME` | `None` | TURN server username |
@@ -599,12 +678,6 @@ lsof -ti:8088 | xargs kill -9
 ### "Stream service is not running" (503)
 
 The pipeline's `start()` method failed. Check server logs for errors (e.g., missing video file, import errors).
-
-### WebSocket Closes Immediately
-
-- Verify the session was created first via `POST /v1/stream/sessions`
-- Verify the stream mode is `bidirectional` (WebSocket requires it)
-- Check that the session ID in the URL matches the created session
 
 ### High Memory Usage
 

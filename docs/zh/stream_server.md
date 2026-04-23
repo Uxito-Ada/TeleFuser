@@ -1,6 +1,6 @@
 # TeleFuser 流式服务器指南
 
-本指南介绍 TeleFuser 的实时流式服务器，它通过 **WebRTC** 或 **WebSocket** 连接持续传输视频（以及可选的音频）—— 与 `telefuser serve` 的批量请求-响应模式不同。
+本指南介绍 TeleFuser 的实时流式服务器，它通过 **WebRTC** 连接持续传输视频（以及可选的音频）—— 与 `telefuser serve` 的批量请求-响应模式不同。
 
 ---
 
@@ -23,12 +23,12 @@ python examples/stream_server/webrtc_client_demo.py --server-url http://localhos
 
 ## 流式模式
 
-TeleFuser 流式服务器支持两种交互模式：
+TeleFuser 流式服务器支持两种交互模式，均可通过 WebRTC 使用：
 
 | 模式 | 传输方式 | 方向 | 使用场景 |
 |------|----------|------|----------|
-| **服务端推送** | WebRTC | 服务端 → 客户端 | 实时预览、文生视频流式传输 |
-| **双向交互** | WebSocket | 客户端 ↔ 服务端 | 交互式生成、语音生成视频 |
+| **服务端推送** | WebRTC (RTP) | 服务端 → 客户端 | 实时预览、文生视频流式传输 |
+| **双向交互** | WebRTC (RTP + DataChannel) | 客户端 ↔ 服务端 | 交互式生成、键盘/摄像头控制、语音生成视频 |
 
 ### 服务端推送（WebRTC）
 
@@ -51,27 +51,43 @@ TeleFuser 流式服务器支持两种交互模式：
 
 管线的 `serve()` 方法产出包含 JPEG 编码帧的数据块。WebRTC 层将其解码为 `av.VideoFrame` 对象，并以目标帧率通过 RTP 流式传输到浏览器。
 
-### 双向交互（WebSocket）
+### 双向交互（WebRTC）
 
 ```
 客户端                          服务端
   │                               │
-  │  POST /v1/stream/sessions     │
-  │  (任务 + 配置)                │
+  │  pc.createDataChannel("telefuser")
+  │  pc.addTransceiver("video", recvonly)
+  │  （可选添加摄像头/麦克风轨道）
+  │                               │
+  │  POST /v1/stream/webrtc/offer │
+  │  (SDP offer + 配置)           │
   │──────────────────────────────►│
-  │  { session_id, status }       │
+  │                               │  create_session(config)
+  │                               │  pull_chunks(session_id)
+  │  SDP answer                   │  启动 ChunkRouter
   │◄──────────────────────────────│
   │                               │
-  │  WS /v1/stream/ws/{session_id}│
-  │◄════════════════════════════►│
-  │  发送：输入数据块              │
-  │  接收：输出数据块              │
+  │  ──── DataChannel JSON ─────► │  push_chunk(session_id, data)
+  │  ◄──── RTP 视频帧 ──────────  │  ChunkRouter → FrameGeneratorTrack
+  │  ◄──── RTP 音频帧 ──────────  │  ChunkRouter → AudioGeneratorTrack
+  │  ◄──── DataChannel JSON ────  │  ChunkRouter → 元数据
   │                               │
-  │  DELETE /v1/stream/sessions/{}│
-  │──────────────────────────────►│  清理
+  │  ──── 媒体轨道（可选）─────► │  IncomingVideoRelay / AudioRelay
+  │                               │  → push_chunk(session_id, frames)
+  │                               │
+  │  {"type": "stop"}             │
+  │  或 DELETE /v1/stream/webrtc/{}│
+  │──────────────────────────────►│  close_session + 清理
 ```
 
-客户端创建会话、连接 WebSocket，然后推送输入数据块（如语音转视频场景中的音频帧）。服务端通过同一 WebSocket 推回输出数据块。
+客户端**必须**在生成 SDP offer 之前创建名为 `"telefuser"` 的 DataChannel。服务端复用该通道接收控制输入并发送元数据输出。视频和音频通过 RTP 媒体轨道双向传输。
+
+**ChunkRouter** 是服务端的分发适配器，精确消费管线的 `pull_chunks()` 生成器一次，并进行分发：
+
+- `frames_b64` → 解码 JPEG → `av.VideoFrame` → 推送到 `FrameGeneratorTrack`（RTP 视频）
+- `audio_b64` → 解码 PCM16 → 馈入 `AudioGeneratorTrack`（RTP 音频）
+- 剩余元数据 → 序列化为 `StreamChunkMessage` JSON → 通过 DataChannel 发送
 
 ---
 
@@ -204,16 +220,16 @@ def get_service() -> MyBidirectionalService:
 
 | 接口 | 方法 | 模式 | 说明 |
 |------|------|------|------|
-| `/v1/stream/webrtc/offer` | POST | 服务端推送 | WebRTC SDP offer/answer 交换 |
-| `/v1/stream/webrtc/{session_id}` | DELETE | 服务端推送 | 关闭 WebRTC 会话 |
-| `/v1/stream/sessions` | POST | 双向交互 | 创建 WebSocket 会话 |
-| `/v1/stream/ws/{session_id}` | WS | 双向交互 | WebSocket 双向连接 |
-| `/v1/stream/sessions/{session_id}` | DELETE | 双向交互 | 关闭 WebSocket 会话 |
-| `/v1/stream/sessions/{session_id}/status` | GET | 双向交互 | 获取会话状态 |
+| `/v1/stream/webrtc/offer` | POST | 两种模式 | WebRTC SDP offer/answer 交换 |
+| `/v1/stream/webrtc/{session_id}` | DELETE | 两种模式 | 关闭 WebRTC 会话 |
+| `/v1/stream/sessions/{session_id}` | DELETE | 两种模式 | 关闭会话（管线 + WebRTC） |
+| `/v1/stream/sessions/{session_id}/status` | GET | 两种模式 | 获取会话状态 |
 
 ### WebRTC: SDP Offer
 
 **POST** `/v1/stream/webrtc/offer`
+
+此端点同时服务于**服务端推送**和**双向交互**模式。服务器根据管线的服务类型自动检测模式。
 
 请求：
 
@@ -221,12 +237,26 @@ def get_service() -> MyBidirectionalService:
 {
   "sdp": "<SDP offer 字符串>",
   "type": "offer",
+  "session_id": "可选-uuid",
   "task": "t2v",
   "prompt": "海上日落",
   "fps": 24,
-  "duration_s": 10
+  "duration_s": 10,
+  "config": {}
 }
 ```
+
+| 字段 | 类型 | 必需 | 说明 |
+|------|------|------|------|
+| `sdp` | `str` | 是 | 浏览器的 SDP offer |
+| `type` | `str` | 是 | SDP 类型（通常为 `"offer"`） |
+| `session_id` | `str` | 否 | 自定义会话 ID（不填则自动生成） |
+| `task` | `str` | 是 | 任务类型（如 `t2v`、`i2v`、`bidirectional`） |
+| `prompt` | `str` | 否 | 输入提示词 |
+| `fps` | `int` | 否 | 目标视频帧率（默认：24） |
+| `config` | `dict` | 否 | 额外配置，传递给 `BidirectionalService.create_session()` |
+
+> 允许附加字段（`"extra": "allow"`），会被转发给管线。
 
 响应（`200 OK`）：
 
@@ -258,53 +288,43 @@ def get_service() -> MyBidirectionalService:
 }
 ```
 
-### WebSocket: 创建会话
+### WebRTC: DataChannel 协议（双向交互）
 
-**POST** `/v1/stream/sessions`
+在双向交互模式下，客户端创建的 `"telefuser"` DataChannel 双向传输 JSON 消息。
 
-请求：
+**客户端 → 服务端消息：**
 
 ```json
-{
-  "task": "s2v",
-  "config": {"fps": 24}
-}
+// 控制输入（如键盘、提示词）
+{"type": "control", "key": "ArrowUp", "action": "press"}
+{"type": "control", "prompt": "新的提示词"}
+
+// 停止会话
+{"type": "stop"}
 ```
 
-响应（`200 OK`）：
+**服务端 → 客户端消息：**
 
 ```json
-{
-  "session_id": "def456",
-  "stream_mode": "bidirectional",
-  "status": "created"
-}
-```
-
-### WebSocket: 双向连接
-
-**WS** `/v1/stream/ws/{session_id}`
-
-创建会话后，连接 WebSocket。以 JSON 消息发送输入数据块，接收输出数据块：
-
-```json
-// 接收的输出数据块
+// 输出数据块元数据（媒体通过 RTP 单独发送）
 {
   "type": "chunk",
-  "session_id": "def456",
+  "session_id": "abc123",
   "index": 0,
-  "data": { ... },
+  "data": {"type": "chunk", "index": 0, "fps": 24, "timestamp": 1714000000.0},
   "timestamp": 1714000000.0
 }
 
-// 结束消息
+// 生成完成
 {
   "type": "done",
-  "session_id": "def456",
-  "total_chunks": 10,
+  "session_id": "abc123",
+  "total_chunks": 240,
   "timestamp": 1714000010.0
 }
 ```
+
+> 控制消息格式由管线定义。以上示例展示了 `ArrowOverlayService` 使用的约定。你的管线的 `push_chunk()` 接收客户端发送的任意 JSON。
 
 ### 流式服务健康检查字段
 
@@ -316,6 +336,8 @@ def get_service() -> MyBidirectionalService:
   "stream_ready": true,
   "stream_mode": "server_push",
   "webrtc_active_sessions": 1,
+  "webrtc_server_push_sessions": 1,
+  "webrtc_bidirectional_sessions": 0,
   "webrtc_max_sessions": 10
 }
 ```
@@ -332,6 +354,8 @@ def get_service() -> MyBidirectionalService:
   "security_level": "STRICT",
   "runner": "StreamPipelineService",
   "webrtc_active_sessions": 0,
+  "webrtc_server_push_sessions": 0,
+  "webrtc_bidirectional_sessions": 0,
   "webrtc_max_sessions": 10
 }
 ```
@@ -340,7 +364,7 @@ def get_service() -> MyBidirectionalService:
 
 ## 客户端集成
 
-### WebRTC（JavaScript）
+### WebRTC：服务端推送（JavaScript）
 
 服务端推送模式的最小浏览器客户端：
 
@@ -379,38 +403,63 @@ pc.ontrack = (event) => {
 };
 ```
 
-### WebSocket（Python）
+### WebRTC：双向交互（JavaScript）
 
-```python
-import asyncio
-import json
-import websockets
-import httpx
+带 DataChannel 控制和可选摄像头/麦克风输入的全双工客户端：
 
-async def stream_bidirectional():
-    # 1. 创建会话
-    async with httpx.AsyncClient() as client:
-        resp = await client.post(
-            "http://localhost:8088/v1/stream/sessions",
-            json={"task": "s2v", "config": {"fps": 24}},
-        )
-        session_id = resp.json()["session_id"]
+```javascript
+const pc = new RTCPeerConnection();
 
-    # 2. 连接 WebSocket
-    async with websockets.connect(
-        f"ws://localhost:8088/v1/stream/ws/{session_id}"
-    ) as ws:
-        # 发送输入
-        await ws.send(json.dumps({"type": "audio", "data": "..."}))
+// 1. 客户端必须在生成 offer 之前创建 DataChannel
+const dc = pc.createDataChannel("telefuser");
+dc.onopen = () => {
+  // 通道打开后发送控制消息
+  dc.send(JSON.stringify({ type: "control", key: "ArrowUp", action: "press" }));
+};
+dc.onmessage = (evt) => {
+  const msg = JSON.parse(evt.data);
+  if (msg.type === "done") console.log("生成完成:", msg.total_chunks, "个数据块");
+};
 
-        # 接收输出
-        async for msg in ws:
-            chunk = json.loads(msg)
-            if chunk["type"] == "done":
-                break
-            print(f"数据块 {chunk['index']}")
+// 2. 可选：向服务端发送摄像头/麦克风
+// const stream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
+// stream.getTracks().forEach(t => pc.addTrack(t, stream));
 
-asyncio.run(stream_bidirectional())
+// 3. 接收服务端输出的视频/音频
+pc.addTransceiver("video", { direction: "recvonly" });
+pc.addTransceiver("audio", { direction: "recvonly" });
+
+pc.ontrack = (evt) => {
+  if (evt.track.kind === "video") {
+    document.getElementById("video").srcObject = evt.streams[0];
+  }
+};
+
+// 4. SDP 交换（与服务端推送使用相同端点）
+const offer = await pc.createOffer();
+await pc.setLocalDescription(offer);
+
+const resp = await fetch("http://localhost:8088/v1/stream/webrtc/offer", {
+  method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({
+    sdp: pc.localDescription.sdp,
+    type: pc.localDescription.type,
+    task: "bidirectional",
+    prompt: "一只狗在奔跑",
+    config: { fps: 24 },
+  }),
+});
+
+const answer = await resp.json();
+await pc.setRemoteDescription(new RTCSessionDescription({
+  sdp: answer.sdp,
+  type: answer.type,
+}));
+
+// 5. 停止会话
+// dc.send(JSON.stringify({ type: "stop" }));
+// await fetch(`http://localhost:8088/v1/stream/webrtc/${answer.session_id}`, { method: "DELETE" });
 ```
 
 ### Gradio UI
@@ -454,6 +503,37 @@ python examples/stream_server/webrtc_client_demo.py --server-url http://localhos
 
 打开浏览器页面，包含视频播放器、提示词输入框，以及连接/停止/取消静音按钮。
 
+### 方向键叠加服务（双向交互）
+
+`examples/stream_server/stream_arrow_overlay.py` —— 一个双向管线，加载视频并根据键盘输入叠加方向键 HUD：
+
+- 实现 `BidirectionalService` 协议，带会话状态管理
+- `push_chunk()` 接收 `{"type": "control", "key": "ArrowUp", "action": "press"}` 并更新 `pressed_keys`
+- `pull_chunks()` 产出带有根据 `pressed_keys` 绘制的方向键叠加的视频帧
+- 循环播放视频帧直到会话关闭
+
+```bash
+# 启动服务端
+telefuser stream-serve examples/stream_server/stream_arrow_overlay.py -p 8088 --skip-validation
+
+# 启动客户端（浏览器打开 localhost:8092）
+python examples/stream_server/webrtc_arrow_overlay_demo.py --server-url http://localhost:8088
+```
+
+在浏览器中按方向键，即可实时看到方向键叠加效果。
+
+### 双向客户端演示
+
+`examples/stream_server/webrtc_bidirectional_demo.py` —— 通用双向 WebRTC 客户端，提供：
+
+- DataChannel 用于发送提示词和控制消息
+- 可选的摄像头和麦克风输入（通过媒体轨道）
+- 服务端输出视频播放器和 DataChannel 消息日志
+
+```bash
+python examples/stream_server/webrtc_bidirectional_demo.py --server-url http://localhost:8088
+```
+
 ---
 
 ## 配置
@@ -463,7 +543,6 @@ python examples/stream_server/webrtc_client_demo.py --server-url http://localhos
 | 变量 | 默认值 | 说明 |
 |------|--------|------|
 | `TELEFUSER_WEBRTC_MAX_SESSIONS` | `10` | 最大并发 WebRTC 会话数（1-100） |
-| `TELEFUSER_STREAM_WS_MAX_CONNECTIONS` | `10` | 最大并发 WebSocket 连接数（1-1000） |
 | `TELEFUSER_STUN_SERVERS` | `["stun:stun.l.google.com:19302"]` | STUN 服务器 URL 列表（JSON 数组） |
 | `TELEFUSER_TURN_SERVER` | `None` | TURN 服务器 URL（如 `turn:your-domain.com:3478`） |
 | `TELEFUSER_TURN_USERNAME` | `None` | TURN 服务器用户名 |
@@ -599,12 +678,6 @@ lsof -ti:8088 | xargs kill -9
 ### "Stream service is not running"（503）
 
 管线的 `start()` 方法执行失败。检查服务器日志中的错误信息（如缺少视频文件、导入错误等）。
-
-### WebSocket 立即关闭
-
-- 确认已先通过 `POST /v1/stream/sessions` 创建会话
-- 确认流式模式为 `bidirectional`（WebSocket 需要此模式）
-- 检查 URL 中的会话 ID 是否与创建的会话匹配
 
 ### 内存占用过高
 
