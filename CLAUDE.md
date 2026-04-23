@@ -134,6 +134,8 @@ TeleFuser's model follows a strict layered architecture for operations:
 | Parallel | [docs/en/parallel.md](docs/en/parallel.md) | [docs/zh/parallel.md](docs/zh/parallel.md) |
 | Profiler | [docs/en/profiler.md](docs/en/profiler.md) | [docs/zh/profiler.md](docs/zh/profiler.md) |
 | Service | [docs/en/service.md](docs/en/service.md) | [docs/zh/service.md](docs/zh/service.md) |
+| Service Metadata | [docs/en/service_metadata.md](docs/en/service_metadata.md) | [docs/zh/service_metadata.md](docs/zh/service_metadata.md) |
+| Stream Server | [docs/en/stream_server.md](docs/en/stream_server.md) | [docs/zh/stream_server.md](docs/zh/stream_server.md) |
 | Testing | [docs/en/testing.md](docs/en/testing.md) | [docs/zh/testing.md](docs/zh/testing.md) |
 | torch.compile Compatibility | [docs/en/torch_compile_compatibility.md](docs/en/torch_compile_compatibility.md) | [docs/zh/torch_compile_compatibility.md](docs/zh/torch_compile_compatibility.md) |
 

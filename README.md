@@ -140,6 +140,9 @@ telefuser serve ./examples/wan_video/wan21_14b_image_to_video_h100.py --port 800
 # With multi-GPU support
 telefuser serve ./examples/wan_video/wan21_14b_image_to_video_h100.py --task i2v --port 8000 --gpu-num 2
 
+# Start stream server (WebRTC / WebSocket)
+telefuser stream-serve examples/stream_server/stream_video_replay.py -p 8088
+
 # Validate a pipeline file
 telefuser validate /path/to/pipeline.py
 
@@ -177,6 +180,25 @@ When a pipeline file provides a manifest/contract, `telefuser serve` uses it as 
 Keep user-facing parameters in the contract, and keep internal tuning values in `PPL_CONFIG` or implementation code.
 
 📖 **For detailed API documentation, client SDK, and examples, see [Service Documentation](docs/en/service.md).**
+
+## Stream Server
+
+TeleFuser also provides a real-time stream server for continuous video delivery:
+
+- **WebRTC** (Server Push) — low-latency video + audio streaming to the browser
+- **WebSocket** (Bidirectional) — duplex communication for interactive generation (e.g., speech-to-video)
+
+```bash
+# Start the stream server with a pipeline
+telefuser stream-serve examples/stream_server/stream_video_replay.py -p 8088
+
+# Open the WebRTC client demo
+python examples/stream_server/webrtc_client_demo.py --server-url http://localhost:8088
+```
+
+Stream pipelines implement a simple protocol (`start` / `stop` / `serve`) and can be used with any video generation model.
+
+📖 **For stream server usage, pipeline authoring, and API reference, see [Stream Server Documentation](docs/en/stream_server.md).**
 
 ## Configuration
 
