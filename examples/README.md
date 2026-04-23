@@ -53,6 +53,21 @@ examples/
   README.md                # This file
 ```
 
+## Example Scripts and Server Contracts
+
+An example script serves two roles:
+
+- local runnable inference entrypoint
+- optional contract source for `telefuser serve`
+
+If an example is intended to be deployed through the server, define a pipeline contract with
+`PIPELINE_MANIFEST` / `PIPELINE_CONTRACT` or the matching factory functions. Only expose user-facing parameters in
+that contract. Keep implementation details such as fixed distillation settings or internal scheduler knobs in
+`PPL_CONFIG` and the script implementation.
+
+See [docs/en/adding_new_example.md](../docs/en/adding_new_example.md) for the authoring pattern and
+[docs/en/service.md](../docs/en/service.md) for the runtime behavior.
+
 ## Configuration
 
 Edit `example_config.yaml` to manage pipelines:

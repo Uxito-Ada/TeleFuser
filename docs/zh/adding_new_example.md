@@ -297,6 +297,72 @@ PPL_CONFIG = dict(
 | `model_root` | **必填**。包含所有模型文件的基础目录。可通过 CLI `--model_root` 覆盖 |
 | 模型文件路径 | 使用相对于 `model_root` 的文件名，如 `dit_filename`、`vae_filename`。特殊模型可使用绝对路径 |
 
+### 面向服务端的 Example 契约
+
+如果 example 需要兼容 `telefuser serve`，建议在 `PPL_CONFIG` 旁边定义 pipeline contract。推荐使用
+`build_pipeline_manifest()` 和 `build_task_contract_template()` 来生成。
+
+```python
+from telefuser.service.core.contract_templates import (
+    build_pipeline_manifest,
+    build_task_contract_template,
+)
+
+PIPELINE_MANIFEST = build_pipeline_manifest(
+    pipeline_name=PPL_CONFIG["name"],
+    supported_tasks=["i2v"],
+    task_contracts={
+        "i2v": build_task_contract_template(
+            "i2v",
+            parameter_overrides={
+                "prompt": {
+                    "required": True,
+                    "description": "正向提示词。",
+                },
+                "resolution": {
+                    "default": PPL_CONFIG["resolution"],
+                    "enum": ["480p", "720p"],
+                    "description": "对用户暴露的输出分辨率。",
+                },
+            },
+            excluded_parameters=("aspect_ratio", "target_video_length"),
+        ),
+    },
+)
+```
+
+#### 契约规则
+
+| 规则 | 说明 |
+|------|------|
+| `supported_tasks` | 只声明 `run_with_file()` 实际能服务的 task。 |
+| `required_inputs` | 描述任务推断和校验所需的文件类输入，例如 `first_image_path`。 |
+| `parameters` | 只包含服务端需要补默认值或校验的用户可见请求参数。 |
+| `excluded_parameters` | 用于移除该 example 中没有意义的通用模板参数。 |
+| 内部调参项 | 保留在 `PPL_CONFIG` 或实现代码中，不要暴露进 contract。 |
+
+#### 用户参数与内部参数的边界
+
+contract 的目标不是把 pipeline 的所有调节项原样导出，而是描述调用方真正需要知道的参数面。
+
+应该放进 contract 的参数：
+
+- `prompt`
+- `negative_prompt`
+- `seed`
+- `resolution`
+- `output_path`
+- 类似 `output_format` 这样的任务特定用户参数
+
+不应放进 contract 的参数：
+
+- `num_inference_steps`
+- 固定的 distill 配置
+- scheduler 内部常量
+- 只属于实现细节的开关参数
+
+这样 `GET /v1/service/metadata` 返回的就会是干净的用户接口，而不是一份实现细节清单。
+
 **特殊模型路径示例：**
 
 ```python

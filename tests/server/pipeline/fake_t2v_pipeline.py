@@ -27,6 +27,26 @@ PPL_CONFIG = dict(
     target_fps=16,
 )
 
+PIPELINE_MANIFEST = {
+    "contract_version": "v1",
+    "pipeline_name": "fake_t2v_pipeline",
+    "supported_tasks": ["t2v"],
+    "supported_media_types": ["video"],
+    "execution_mode": "serial_single_pipeline",
+    "effective_max_concurrent_tasks": 1,
+    "entrypoints": {
+        "get_pipeline": "get_pipeline",
+        "run_with_file": "run_with_file",
+    },
+    "task_contracts": {
+        "t2v": {
+            "media_type": "video",
+            "required_inputs": [],
+            "optional_inputs": [],
+        }
+    },
+}
+
 
 class FakeVideoPipeline:
     """Mock video generation pipeline for testing."""

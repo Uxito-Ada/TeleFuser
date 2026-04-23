@@ -6,6 +6,7 @@ import click
 
 from telefuser.core.config import TELEFUSER_LOGO
 from telefuser.service.security.security_validator import SecurityLevel, validate_with_report
+from telefuser.service_types import TaskType
 
 
 @click.group()
@@ -21,7 +22,7 @@ def main():
     "--task",
     "-t",
     default="i2v",
-    type=click.Choice(["t2v", "i2v", "fl2v", "vc", "t2i", "i2i"], case_sensitive=False),
+    type=click.Choice(TaskType.values(), case_sensitive=False),
     help="Task type (t2v, i2v, fl2v, vc, t2i, i2i)",
 )
 @click.option("--port", "-p", default=8000, type=int, help="Server port")
@@ -91,7 +92,57 @@ def serve(
         return
 
     # Start server
-    run_server(pipe_path, task, port, host, cache_dir, parallelism)
+    run_server(pipe_path, TaskType(task.lower()), port, host, cache_dir, parallelism)
+
+
+@main.command(name="stream-serve")
+@click.argument("pipe_path")
+@click.option("--port", "-p", default=8088, type=int, help="Server port")
+@click.option("--host", default="0.0.0.0", type=str, help="Server host")
+@click.option(
+    "--security-level",
+    type=click.Choice(["none", "basic", "strict", "sandbox"], case_sensitive=False),
+    default="strict",
+    help="Security validation level for pipeline file (default: strict)",
+)
+@click.option(
+    "--skip-validation",
+    is_flag=True,
+    default=False,
+    help="Skip security validation (not recommended for production)",
+)
+def stream_serve(
+    pipe_path: str,
+    port: int,
+    host: str,
+    security_level: str,
+    skip_validation: bool,
+) -> None:
+    """Start the TeleFuser stream server (WebRTC / WebSocket).
+
+    \b
+    PIPE_PATH is a Python file that defines get_service() returning
+    a ServerPushService (WebRTC) or BidirectionalService (WebSocket).
+
+    \b
+    Examples:
+        telefuser stream-serve examples/stream_video_replay.py
+        telefuser stream-serve examples/stream_video_replay.py -p 8000 --host 0.0.0.0
+    """
+    from telefuser.service.main import run_stream_server
+    from telefuser.service.security.security_validator import PipelineSecurityValidator, SecurityError
+
+    if not skip_validation:
+        level = SecurityLevel[security_level.upper()]
+        validator = PipelineSecurityValidator(security_level=level)
+        try:
+            validator.assert_safe(pipe_path)
+        except SecurityError as e:
+            click.echo(f"\n❌ Security validation failed:\n{e}", err=True)
+            click.echo(f"\nTo bypass: telefuser stream-serve {pipe_path} --skip-validation", err=True)
+            raise click.Abort()
+
+    run_stream_server(pipe_path, port, host, skip_validation=True)
 
 
 @main.command(name="validate")

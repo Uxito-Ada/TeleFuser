@@ -18,6 +18,7 @@ from __future__ import annotations
 from .config import SecurityLevel, ServerConfig, server_config
 from .container import ServiceContainer
 from .file_service import FileService
+from .pipeline_contract import PipelineContract, PipelineEntrypoints
 from .pipeline_runner import PipelineRunResult, PipelineRunner
 from .pipeline_service import PipelineService
 from .task_manager import TaskManager, TaskStatus
@@ -31,6 +32,8 @@ __all__ = [
     "server_config",
     "ServiceContainer",
     "FileService",
+    "PipelineContract",
+    "PipelineEntrypoints",
     "PipelineRunner",
     "PipelineRunResult",
     "PipelineService",
