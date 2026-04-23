@@ -133,6 +133,7 @@ class TestTaskRequest:
         assert data["task"] == "t2i"
         assert data["aspect_ratio"] == "1:1"
         assert data["output_format"] == "webp"
+
     def test_extra_contract_fields_are_preserved(self):
         """TaskRequest should preserve extra contract-managed fields for runner execution."""
         request = TaskRequest(task="t2v", num_inference_steps=8)

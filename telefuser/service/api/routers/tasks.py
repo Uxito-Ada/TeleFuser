@@ -15,8 +15,8 @@ from typing import TYPE_CHECKING, Any
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 from pydantic import ValidationError
 
-from telefuser.service_types import AspectRatio, OutputFormat, StopTaskStatus, TaskStatus
 from telefuser.service.core.pipeline_contract import default_task_contract, validate_task_name_format
+from telefuser.service_types import AspectRatio, OutputFormat, StopTaskStatus, TaskStatus
 from telefuser.utils.logging import logger
 
 from ..schema import StopTaskResponse, TaskRequest, TaskResponse

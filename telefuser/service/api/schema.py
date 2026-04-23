@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from typing import Any
 
-from telefuser.service_types import AspectRatio, OutputFormat, StopTaskStatus, TaskStatus, TaskType
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+
+from telefuser.service_types import AspectRatio, OutputFormat, StopTaskStatus, TaskStatus, TaskType
 
 from ..core.pipeline_contract import infer_media_type_for_task, validate_task_name_format
 from .utils import generate_task_id
