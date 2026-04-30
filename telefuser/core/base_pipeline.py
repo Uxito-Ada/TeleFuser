@@ -236,6 +236,12 @@ class BasePipeline(ABC):
                 return f"{self._ANSI_DIM}tuple({len(value)} items){self._ANSI_RESET}"
             formatted_items = [self._format_call_value(v) for v in value]
             return f"({', '.join(formatted_items)})"
+        elif isinstance(value, dict):
+            if len(value) > 8:
+                return f"{self._ANSI_DIM}dict({len(value)} items){self._ANSI_RESET}"
+            # Recurse so inner Tensor/Image show as shape summary, not raw dump.
+            formatted_items = [f"{k}={self._format_call_value(v)}" for k, v in value.items()]
+            return "{" + ", ".join(formatted_items) + "}"
         elif value is None:
             return f"{self._ANSI_DIM}None{self._ANSI_RESET}"
         return str(value)

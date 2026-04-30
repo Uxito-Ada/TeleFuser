@@ -26,7 +26,7 @@ from telefuser.utils.video import get_target_video_size_from_ratio, save_video
 TF_MODEL_ZOO_PATH = os.environ.get("TF_MODEL_ZOO_PATH", "model_zoo")
 PPL_CONFIG = dict(
     name="wan22_A14B_t2v_h100",
-    model_root=TF_MODEL_ZOO_PATH + "/Wan2.2-T2V-14B",
+    model_root=TF_MODEL_ZOO_PATH + "/Wan2.2-T2V-A14B",
     negative_prompt="Overly saturated colors, overexposed, static, blurry details, subtitles, style, artwork, painting, frame, still, overall grayish, worst quality, low quality, JPEG compression artifacts, ugly, incomplete, extra fingers, poorly drawn hands, poorly drawn face, deformed, disfigured, malformed limbs, fused fingers, static frames, cluttered background, three legs, crowded background, walking backwards",
     num_inference_steps=40,
     num_frames=81,
@@ -43,7 +43,7 @@ PPL_CONFIG = dict(
     dit_low_path_list="low_noise_model/diffusion_pytorch_model-0000*-of-00006.safetensors",
     enable_feature_cache_dit_high=True,
     enable_feature_cache_dit_low=True,
-    model_type="Wan2_2-T2V-14B",
+    model_type="Wan2_2-T2V-A14B",
     target_fps=16,
 )
 
@@ -165,6 +165,34 @@ def run(
         sigma_shift=PPL_CONFIG["sigma_shift"],
     )
     return video
+
+
+def run_with_file(
+    pipeline,
+    prompt,
+    negative_prompt,
+    seed,
+    output_path,
+    **kwargs,
+):
+    """Run pipeline and save to file. Entrypoint used by `telefuser serve`."""
+    resolution = kwargs.get("resolution") or PPL_CONFIG["resolution"]
+    aspect_ratio = kwargs.get("aspect_ratio") or "16:9"
+    video = run(
+        pipeline,
+        prompt=prompt,
+        negative_prompt=negative_prompt,
+        seed=seed,
+        resolution=resolution,
+        aspect_ratio=aspect_ratio,
+    )
+    print(f"Saving video to {output_path}")
+    save_video(
+        video,
+        output_path,
+        fps=PPL_CONFIG["target_fps"],
+        quality=6,
+    )
 
 
 @click.command()

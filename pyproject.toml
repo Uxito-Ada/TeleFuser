@@ -43,10 +43,23 @@ dependencies = [
     "ftfy",
     "ray",
     "pydantic>=2.0.0",
-    "pydantic-settings>=2.0.0"
+    "pydantic-settings>=2.0.0",
+    "torchvision",
 ]
 
 [project.optional-dependencies]
+
+# Latent cache subsystem (telefuser.cache_mem).
+# Required only when the service is started with enable_latent_cache=true
+# (or when running the wan22 service example with cache_mem). Installing
+# without this extra leaves the cache layer disabled and adds zero overhead.
+cache = [
+    "faiss-cpu",
+    "scipy",
+    "qwen_vl_utils",
+    "sentencepiece",
+    "protobuf",
+]
 
 dev = [
     "pytest>=7.0.0",

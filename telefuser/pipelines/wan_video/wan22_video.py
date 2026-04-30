@@ -120,7 +120,8 @@ class Wan22VideoPipeline(BasePipeline):
         cfg_scale_low: float = 5.0,
         boundary: float = 0.875,
         target_fps: int | None = None,
-    ) -> List[Image.Image]:
+        latent_data: dict | None = None,
+    ) -> List[Image.Image] | tuple[List[Image.Image], dict]:
         """Generate video from text prompt and optional input image."""
         logger.info(f"start genereate {num_frames} {width}x{height} frames")
         height, width = self.check_resize_height_width(height, width)
@@ -184,8 +185,16 @@ class Wan22VideoPipeline(BasePipeline):
             cfg_scale_low,
             sigma_shift,
             boundary,
+            latent_data=latent_data,
         )
-        latents = latents_handler()
+        denoise_result = latents_handler()
+
+        # MoE stage returns a tuple when latent_data is provided.
+        latent_payload: dict | None = None
+        if isinstance(denoise_result, tuple):
+            latents, latent_payload = denoise_result
+        else:
+            latents = denoise_result
         frames_handler = auto_async_call(self.vae_stage.process, "decode_video", latents, **tiler_kwargs)
         frames = frames_handler()
         frames = self.tensor2video(frames[0])
@@ -197,6 +206,9 @@ class Wan22VideoPipeline(BasePipeline):
             frames = frames_handler()
             logger.info(f"VFI complete, total frames: {len(frames)}")
 
+        if latent_payload is not None:
+            latent_payload["num_frames"] = num_frames
+            return frames, latent_payload
         return frames
 
     def __del__(self):

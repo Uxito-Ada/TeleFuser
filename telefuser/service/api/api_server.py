@@ -56,6 +56,7 @@ class ApiServer:
         self.stream_service: StreamPipelineService | None = None
         self._webrtc_routes: object | None = None
         self.media_service: MediaGenerationService | None = None
+        self.cache_service: Any | None = None
         self.max_queue_size = max_queue_size
         self.max_concurrent_tasks = max_concurrent_tasks
         self.configured_max_concurrent_tasks = configured_max_concurrent_tasks or max_concurrent_tasks
@@ -266,11 +267,21 @@ class ApiServer:
                 logger.warning(f"Failed to query task contract from inference service metadata: {e}")
         return None
 
-    def initialize_services(self, cache_dir: Path, inference_service: PipelineService) -> None:
+    def initialize_services(
+        self,
+        cache_dir: Path,
+        inference_service: PipelineService,
+        cache_service: Any | None = None,
+    ) -> None:
         """Initialize file and media services."""
         self.file_service = FileService(cache_dir)
         self.inference_service = inference_service
-        self.media_service = MediaGenerationService(self.file_service, inference_service)
+        self.cache_service = cache_service
+        self.media_service = MediaGenerationService(
+            self.file_service,
+            inference_service,
+            cache_service=cache_service,
+        )
         self.task_processor = AsyncTaskProcessor(
             task_manager=self.task_manager,
             media_service=self.media_service,
@@ -304,6 +315,12 @@ class ApiServer:
                 result = cleanup()
                 if inspect.isawaitable(result):
                     await result
+
+        if getattr(self, "cache_service", None) is not None:
+            try:
+                self.cache_service.shutdown()
+            except Exception as exc:
+                logger.warning(f"cache service shutdown failed: {exc}")
 
     def get_app(self) -> FastAPI:
         """Get the FastAPI application instance."""

@@ -39,6 +39,7 @@ class ServiceContainer:
     pipeline_service: PipelineService | None = None
     stream_pipeline_service: StreamPipelineService | None = None
     media_service: MediaGenerationService | None = None
+    cache_service: Any | None = None
     _cache_dir: Path | None = field(default=None, repr=False)
 
     @classmethod
@@ -109,8 +110,30 @@ class ServiceContainer:
         self.media_service = MediaGenerationService(
             file_service=self.file_service,
             inference_service=self.pipeline_service,
+            cache_service=self.cache_service,
         )
         return self.media_service
+
+    def initialize_cache_service(self, pipe_path: str) -> Any | None:
+        """Initialize optional latent cache service when enabled."""
+        if not getattr(self.config, "enable_latent_cache", False):
+            return None
+
+        # Lazy import to avoid pulling cache_mem deps when disabled.
+        from ..cache.cache_factory import CacheServiceFactory
+
+        try:
+            self.cache_service = CacheServiceFactory.create_cache_service(
+                ppl_file=pipe_path,
+                enable_latent_cache=True,
+            )
+        except Exception as exc:
+            logger.warning(f"CacheServiceFactory.create_cache_service failed: {exc}")
+            self.cache_service = None
+
+        if self.cache_service is None:
+            logger.warning("enable_latent_cache=True but cache_service is None")
+        return self.cache_service
 
     def initialize_all(
         self,
@@ -134,6 +157,7 @@ class ServiceContainer:
             return False
 
         self.initialize_file_service()
+        self.initialize_cache_service(pipe_path=pipe_path)
         self.initialize_media_service()
 
         return True
@@ -166,7 +190,11 @@ class ServiceContainer:
         )
 
         if self.file_service and self.pipeline_service:
-            api_server.initialize_services(self.file_service.cache_dir, self.pipeline_service)
+            api_server.initialize_services(
+                self.file_service.cache_dir,
+                self.pipeline_service,
+                cache_service=self.cache_service,
+            )
 
         if self.stream_pipeline_service:
             api_server.initialize_stream_service(self.stream_pipeline_service)
@@ -199,6 +227,13 @@ class ServiceContainer:
         if self.stream_pipeline_service:
             await self.stream_pipeline_service.aclose()
             self.stream_pipeline_service = None
+
+        if self.cache_service is not None:
+            try:
+                self.cache_service.shutdown()
+            except Exception as exc:
+                logger.warning(f"cache service shutdown failed: {exc}")
+            self.cache_service = None
 
         self.media_service = None
 

@@ -486,6 +486,18 @@ class AdaTaylorCache(BaseFeatureCache):
         state = self.cond_state if is_cond else self.uncond_state
         return state.approximate(input)
 
+    def last_step_was_compute(self, is_cond: bool = True) -> bool:
+        """Check if the most recent step was a real compute step (no side effects).
+
+        Args:
+            is_cond: True for conditional path, False for unconditional path.
+
+        Returns:
+            True if the current step required real computation.
+        """
+        state = self.cond_state if is_cond else self.uncond_state
+        return state.current_step in state.compute_steps
+
     def get_compute_steps(self) -> List[int]:
         """Get list of steps where real computation will occur (for debugging).
 

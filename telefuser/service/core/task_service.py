@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import threading
+from types import SimpleNamespace
+from typing import Any
 
 from telefuser.service_types import MediaType, PipelineRunStatus, TaskStatus, TaskType
 from telefuser.utils.logging import logger
@@ -19,15 +21,36 @@ _video_handler = VideoHandler()
 _audio_handler = AudioHandler()
 
 
+def _build_cache_task_request(task_data: dict) -> SimpleNamespace:
+    """Build a minimal task_request stub for the cache layer.
+
+    Splatting ``task_data`` directly would crash because ``TaskRequest`` is
+    ``extra="allow"`` and may contain keys that are not valid Python
+    identifiers. The cache layer only reads ``task_id`` / ``task`` /
+    ``prompt`` via ``getattr``, so we whitelist those.
+    """
+    return SimpleNamespace(
+        task_id=task_data.get("task_id"),
+        task=task_data.get("task"),
+        prompt=task_data.get("prompt") or "",
+    )
+
+
 class MediaGenerationService:
     """Service for media generation (video and image).
 
     Orchestrates file downloads, path resolution, and pipeline execution.
     """
 
-    def __init__(self, file_service: FileService, inference_service: PipelineService) -> None:
+    def __init__(
+        self,
+        file_service: FileService,
+        inference_service: PipelineService,
+        cache_service: Any | None = None,
+    ) -> None:
         self.file_service = file_service
         self.inference_service = inference_service
+        self.cache_service = cache_service
 
     async def generate_media_with_stop_event(
         self, message: TaskRequest, stop_event: threading.Event
@@ -87,6 +110,17 @@ class MediaGenerationService:
         actual_save_path = self.file_service.get_output_path(message.output_path, media_type=media_type)
         task_data["output_path"] = str(actual_save_path)
 
+        # Cache lookup (best-effort: degrade silently on any failure)
+        cache_task_request: SimpleNamespace | None = None
+        if self.cache_service is not None:
+            try:
+                cache_task_request = _build_cache_task_request(task_data)
+                latent_data = await self.cache_service.build_latent_data(cache_task_request, task_data)
+                if latent_data is not None:
+                    task_data["latent_data"] = latent_data
+            except Exception as exc:
+                logger.warning(f"[task_service] cache lookup failed, ignored: {exc}")
+
         result = await self.inference_service.run_task_with_stop_event(
             task_data,
             stop_event,
@@ -100,6 +134,18 @@ class MediaGenerationService:
             raise RuntimeError("Task processing timeout")
 
         if result.get("status") == PipelineRunStatus.SUCCESS:
+            # Cache writeback (best-effort: degrade silently on any failure)
+            if self.cache_service is not None:
+                try:
+                    raw = result.get("raw")
+                    latent_payload = raw.get("latent_payload") if isinstance(raw, dict) else None
+                    if latent_payload:
+                        if cache_task_request is None:
+                            cache_task_request = _build_cache_task_request(task_data)
+                        await self.cache_service.save_latent_payload(cache_task_request, latent_payload)
+                except Exception as exc:
+                    logger.warning(f"[task_service] cache writeback failed, ignored: {exc}")
+
             output_path = result.get("output_path") or task_data.get("output_path") or message.output_path
             return TaskResponse(
                 task_id=message.task_id,

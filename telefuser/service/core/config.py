@@ -50,6 +50,8 @@ class ServerConfig(BaseSettings):
     # Cache settings
     cache_dir: str = Field(default="work_dirs/server_cache", description="Cache directory path")
 
+    enable_latent_cache: bool = Field(default=False, description="Enable latent cache service")
+
     # Security settings
     security_level: SecurityLevel = Field(default=SecurityLevel.STRICT, description="Security validation level")
 
