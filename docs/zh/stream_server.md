@@ -524,14 +524,209 @@ python examples/stream_server/webrtc_arrow_overlay_demo.py --server-url http://l
 
 ### 双向客户端演示
 
-`examples/stream_server/webrtc_bidirectional_demo.py` —— 通用双向 WebRTC 客户端，提供：
+`examples/stream_server/webrtc_bidirectional_demo.py` —— LingBot-World-Fast 双向 WebRTC 客户端，提供：
 
 - DataChannel 用于发送提示词和控制消息
-- 可选的摄像头和麦克风输入（通过媒体轨道）
-- 服务端输出视频播放器和 DataChannel 消息日志
+- LingBot 输入图片路径、提示词、生成参数和方向键控制
+- 服务端输出视频播放器、控制 HUD 和 DataChannel 消息日志
 
 ```bash
 python examples/stream_server/webrtc_bidirectional_demo.py --server-url http://localhost:8088
+```
+
+### LingBot-World-Fast 流式生成
+
+`examples/stream_server/stream_lingbot_world_fast.py` 提供 LingBot-World-Fast 的双向流式服务。该服务使用 WebRTC RTP 输出生成视频，通过 DataChannel 接收 prompt 和方向控制消息。当前 demo 页面不采集浏览器摄像头和麦克风；LingBot 当前仅输出视频，没有音频输出。
+
+#### 模型文件
+
+LingBot-World-Fast 需要两类权重：
+
+| 环境变量 | 示例 | 说明 |
+|----------|------|------|
+| `LINGBOT_WORLD_CHECKPOINT_DIR` | `/storage/model_zoo/Wan2.2-Distill-Models` | 基础权重目录，包含 VAE、T5 文本编码器和 tokenizer |
+| `LINGBOT_WORLD_FAST_CHECKPOINT_SUBDIR` | `/storage/model_zoo/lingbot-world-fast` | LingBot-World-Fast DiT 权重目录；可以是绝对路径 |
+
+#### 启动服务端
+
+两张 GPU 的推荐启动方式如下。DiT 放在 GPU0，文本编码器和 VAE 放在 GPU1；如果 GPU1 显存紧张，可以把 VAE 改回 CPU。
+
+```bash
+TELEFUSER_TURN_SERVER='turn:127.0.0.1:3478' \
+TELEFUSER_TURN_USERNAME=telefuser \
+TELEFUSER_TURN_CREDENTIAL=your-turn-password \
+LINGBOT_WORLD_CHECKPOINT_DIR=/storage/model_zoo/Wan2.2-Distill-Models \
+LINGBOT_WORLD_FAST_CHECKPOINT_SUBDIR=/storage/model_zoo/lingbot-world-fast \
+LINGBOT_WORLD_CONTROL_TYPE=cam \
+LINGBOT_WORLD_MAX_AREA=99840 \
+telefuser stream-serve examples/stream_server/stream_lingbot_world_fast.py \
+  -p 8088 --host 0.0.0.0 --skip-validation
+```
+
+等待日志出现以下内容后再连接浏览器 demo：
+
+```text
+Starting stream server on 0.0.0.0:8088
+```
+
+可以用健康检查确认服务已可用：
+
+```bash
+curl --noproxy '*' http://127.0.0.1:8088/v1/service/health
+```
+
+#### 启动浏览器 demo
+
+通过 VS Code Remote SSH 使用笔记本浏览器访问远端 demo 时，浏览器 JavaScript 实际运行在笔记本本地。此时建议使用 TURN，并将远端 `3478` 端口转发到本地 `3478`。
+
+```bash
+python examples/stream_server/webrtc_bidirectional_demo.py \
+  --server-url http://localhost:8088 \
+  --port 8091 \
+  --image-path /tmp/lingbot_test_input.png \
+  --frame-num 81 \
+  --chunk-size 3 \
+  --fps 16 \
+  --turn-url 'turn:localhost:3478?transport=tcp' \
+  --turn-username telefuser \
+  --turn-credential your-turn-password \
+  --force-turn-relay \
+  --ice-gather-timeout-ms 30000 \
+  --control-lateral-step 0.25 \
+  --control-yaw-step-degrees 12 \
+  --no-open
+```
+
+浏览器打开：
+
+```text
+http://localhost:8091
+```
+
+`--image-path` 是服务端文件路径，不是笔记本本地路径。demo 默认开启代理，浏览器只需要访问 demo 端口；`/v1/stream/webrtc/*` 请求会由 demo 进程转发到 `--server-url`。
+
+#### 不使用 TURN：在服务器浏览器查看
+
+如果浏览器真的运行在服务器侧，例如远程桌面、VNC 或 noVNC 中的 Chrome，可以不使用 TURN。此时不要设置 `TELEFUSER_TURN_*`，demo 也不要传 `--turn-url`。
+
+服务端：
+
+```bash
+env -u TELEFUSER_TURN_SERVER \
+-u TELEFUSER_TURN_USERNAME \
+-u TELEFUSER_TURN_CREDENTIAL \
+LINGBOT_WORLD_CHECKPOINT_DIR=/storage/model_zoo/Wan2.2-Distill-Models \
+LINGBOT_WORLD_FAST_CHECKPOINT_SUBDIR=/storage/model_zoo/lingbot-world-fast \
+LINGBOT_WORLD_CONTROL_TYPE=cam \
+LINGBOT_WORLD_MAX_AREA=99840 \
+telefuser stream-serve examples/stream_server/stream_lingbot_world_fast.py \
+  -p 8088 --host 0.0.0.0 --skip-validation
+```
+
+demo：
+
+```bash
+env -u TELEFUSER_TURN_SERVER \
+-u TELEFUSER_TURN_USERNAME \
+-u TELEFUSER_TURN_CREDENTIAL \
+python examples/stream_server/webrtc_bidirectional_demo.py \
+  --server-url http://127.0.0.1:8088 \
+  --port 8091 \
+  --image-path /tmp/lingbot_test_input.png \
+  --frame-num 81 \
+  --chunk-size 3 \
+  --fps 16 \
+  --control-lateral-step 0.25 \
+  --control-yaw-step-degrees 12 \
+  --no-open
+```
+
+在服务器浏览器打开：
+
+```text
+http://127.0.0.1:8091
+```
+
+#### 方向控制
+
+demo 支持键盘方向键和页面 D-pad：
+
+| 输入 | cam 模式含义 |
+|------|--------------|
+| `↑` | 相机前进 |
+| `↓` | 相机后退 |
+| `←` | 左转并向左横移 |
+| `→` | 右转并向右横移 |
+
+控制只会作用于“尚未开始生成”的后续 chunk；已经在 denoising 或 decoding 的 chunk 不会被即时改变。因此建议在连接成功后尽早长按方向键，而不是等视频快结束时再点击。
+
+DataChannel 日志中出现以下状态时，表示方向控制已被服务端消费并应用到某个生成 chunk：
+
+```text
+"stage":"control_state"
+"stage":"applying_direction_control"
+```
+
+demo 默认开启 `Control HUD`。该 HUD 会叠加在使用了方向控制的输出 chunk 左上角，用于确认控制链路生效。确认链路后可以在页面取消勾选，观察纯模型输出效果。
+
+常用控制强度参数：
+
+| 参数 | 默认值 | 说明 |
+|------|--------|------|
+| `--control-move-step` | `0.18` | 前进/后退位移步长 |
+| `--control-yaw-step-degrees` | `10.0` | 每个 latent frame 的转向角度 |
+| `--control-lateral-step` | `0.12` | 左右横向平移步长 |
+| `--show-control-hud / --no-show-control-hud` | `true` | 是否在受控 chunk 上叠加方向 HUD |
+
+如果左右效果不明显，可以增大 `--control-lateral-step`，例如 `0.25` 或 `0.3`。
+
+#### `cam` 与 `act` 控制模式
+
+| 模式 | 输入 | 说明 |
+|------|------|------|
+| `cam` | `poses + intrinsics` | 相机轨迹控制。服务端会将方向键转换为相机位姿，再构造 6 通道 camera control。 |
+| `act` | `poses + intrinsics + action` | 动作控制。需要 7 通道 action-control 权重。 |
+
+当前 demo 默认使用 `cam`。如果模型权重是 camera-control 权重，应保持：
+
+```bash
+LINGBOT_WORLD_CONTROL_TYPE=cam
+--control-mode cam
+```
+
+只有在使用 action-control 权重时才应切换到：
+
+```bash
+LINGBOT_WORLD_CONTROL_TYPE=act
+--control-mode act
+```
+
+#### 显存与分辨率
+
+LingBot 的 KV cache 会随 `frame_num` 和输出分辨率增长。832x480、81 帧接近 80GB H100 的显存上限，推荐先使用较低分辨率验证链路：
+
+```bash
+LINGBOT_WORLD_MAX_AREA=99840  # 约 416x240
+```
+
+常用调参方向：
+
+| 参数 | 影响 |
+|------|------|
+| `LINGBOT_WORLD_MAX_AREA` | 降低输出面积，显著降低显存占用 |
+| `--frame-num` | 降低总生成帧数和 latent chunk 数 |
+| `--chunk-size` | 影响每次生成的 latent chunk 大小 |
+
+服务当前只允许一个 LingBot active session。重新连接前请点击 Stop，或调用：
+
+```bash
+curl -X DELETE http://127.0.0.1:8088/v1/stream/webrtc/<session_id>
+```
+
+如果仍然 OOM，检查是否有其他进程占用 GPU：
+
+```bash
+nvidia-smi
 ```
 
 ---
@@ -666,7 +861,9 @@ telefuser stream-serve pipeline.py -p 8000
 
 ### 浏览器没有声音
 
-点击 **Unmute** 按钮。浏览器要求用户操作后才能播放音频。视频元素默认为静音状态。
+只有管线输出 `audio_b64` 时浏览器才会有声音。`stream_video_replay.py` 可以包含音频；LingBot-World-Fast 当前只输出视频帧，不生成音频，因此 demo 中没有静音/取消静音按钮。
+
+如果使用包含音频的管线，浏览器通常要求用户操作后才能播放音频。此时点击页面上的 **Unmute** 按钮即可。
 
 ### 端口被占用
 
@@ -682,3 +879,11 @@ lsof -ti:8088 | xargs kill -9
 ### 内存占用过高
 
 每个 WebRTC 会话在队列中持有视频帧。限制 `webrtc_max_sessions` 并确保管线不缓冲过多帧。服务器在客户端断开连接时会自动清理会话。
+
+LingBot-World-Fast 的显存主要由 DiT 权重、VAE/text encoder 和每个 session 的 runtime/KV cache 占用。如果出现 CUDA OOM：
+
+1. 确认没有重复连接或遗留 session：`curl --noproxy '*' http://127.0.0.1:8088/v1/service/health`
+2. 点击 demo 的 Stop 或调用 `DELETE /v1/stream/webrtc/{session_id}` 关闭旧会话
+3. 降低 `LINGBOT_WORLD_MAX_AREA` 或 `--frame-num`
+4. 使用 `nvidia-smi` 检查是否有其他任务占用 GPU
+5. 设置 `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True` 减少碎片化影响

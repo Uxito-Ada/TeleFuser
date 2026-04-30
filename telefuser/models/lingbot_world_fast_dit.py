@@ -1,0 +1,570 @@
+from __future__ import annotations
+
+import math
+import os
+from typing import Any
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+from einops import rearrange
+
+from telefuser.core.base_model import BaseModel
+from telefuser.ops.normalization import LayerNorm, RMSNorm
+from telefuser.utils.logging import logger
+from telefuser.utils.model_weight import init_weights_on_device, load_state_dict
+
+from .wan_video_dit import apply_rotary_emb, precompute_freqs_cis_3d, sinusoidal_embedding_1d
+
+
+class CausalSelfAttention(nn.Module):
+    """Causal self-attention with rolling KV cache support."""
+
+    def __init__(
+        self,
+        dim: int,
+        num_heads: int,
+        local_attn_size: int = -1,
+        sink_size: int = 0,
+        qk_norm: bool = True,
+        eps: float = 1e-6,
+    ) -> None:
+        super().__init__()
+        if dim % num_heads != 0:
+            raise ValueError(f"dim={dim} is not divisible by num_heads={num_heads}")
+
+        self.dim = dim
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads
+        self.local_attn_size = local_attn_size
+        self.sink_size = sink_size
+
+        self.q = nn.Linear(dim, dim)
+        self.k = nn.Linear(dim, dim)
+        self.v = nn.Linear(dim, dim)
+        self.o = nn.Linear(dim, dim)
+        self.norm_q = RMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
+        self.norm_k = RMSNorm(dim, eps=eps) if qk_norm else nn.Identity()
+
+    def _apply_causal_rope(
+        self,
+        x: torch.Tensor,
+        freqs_cos: torch.Tensor,
+        freqs_sin: torch.Tensor,
+        grid_size: tuple[int, int, int],
+        start_frame: int,
+    ) -> torch.Tensor:
+        f, h, w = grid_size
+        head_dim = self.head_dim
+
+        f_dim = head_dim - 2 * (head_dim // 3)
+        h_dim = head_dim // 3
+        w_dim = head_dim // 3
+        seq_len = f * h * w
+
+        cos_f, cos_h, cos_w = torch.split(freqs_cos, [f_dim // 2, h_dim // 2, w_dim // 2], dim=-1)
+        sin_f, sin_h, sin_w = torch.split(freqs_sin, [f_dim // 2, h_dim // 2, w_dim // 2], dim=-1)
+
+        cos = torch.cat(
+            [
+                cos_f[start_frame : start_frame + f].view(f, 1, 1, -1).expand(f, h, w, -1),
+                cos_h[:h].view(1, h, 1, -1).expand(f, h, w, -1),
+                cos_w[:w].view(1, 1, w, -1).expand(f, h, w, -1),
+            ],
+            dim=-1,
+        ).reshape(seq_len, 1, -1)
+        sin = torch.cat(
+            [
+                sin_f[start_frame : start_frame + f].view(f, 1, 1, -1).expand(f, h, w, -1),
+                sin_h[:h].view(1, h, 1, -1).expand(f, h, w, -1),
+                sin_w[:w].view(1, 1, w, -1).expand(f, h, w, -1),
+            ],
+            dim=-1,
+        ).reshape(seq_len, 1, -1)
+
+        return apply_rotary_emb(x, (cos, sin))
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        freqs_cos: torch.Tensor,
+        freqs_sin: torch.Tensor,
+        grid_size: tuple[int, int, int],
+        kv_cache: dict[str, torch.Tensor],
+        current_start: int,
+        max_attention_size: int,
+    ) -> torch.Tensor:
+        q = rearrange(self.norm_q(self.q(x)), "b s (n d) -> b s n d", n=self.num_heads)
+        k = rearrange(self.norm_k(self.k(x)), "b s (n d) -> b s n d", n=self.num_heads)
+        v = rearrange(self.v(x), "b s (n d) -> b s n d", n=self.num_heads)
+
+        frame_tokens = grid_size[1] * grid_size[2]
+        start_frame = current_start // frame_tokens
+
+        q = self._apply_causal_rope(q, freqs_cos, freqs_sin, grid_size, start_frame)
+        k = self._apply_causal_rope(k, freqs_cos, freqs_sin, grid_size, start_frame)
+
+        num_new_tokens = q.shape[1]
+        current_end = current_start + num_new_tokens
+        sink_tokens = self.sink_size * frame_tokens
+
+        cache_k = kv_cache["k"]
+        cache_v = kv_cache["v"]
+        kv_cache_size = cache_k.shape[1]
+        global_end = int(kv_cache["global_end_index"].item())
+        local_end = int(kv_cache["local_end_index"].item())
+
+        if (
+            self.local_attn_size != -1
+            and current_end > global_end
+            and num_new_tokens + local_end > kv_cache_size
+        ):
+            evicted = num_new_tokens + local_end - kv_cache_size
+            rolled = local_end - evicted - sink_tokens
+            cache_k[:, sink_tokens : sink_tokens + rolled] = cache_k[
+                :, sink_tokens + evicted : sink_tokens + evicted + rolled
+            ].clone()
+            cache_v[:, sink_tokens : sink_tokens + rolled] = cache_v[
+                :, sink_tokens + evicted : sink_tokens + evicted + rolled
+            ].clone()
+            local_end = local_end + current_end - global_end - evicted
+        else:
+            local_end = local_end + current_end - global_end
+
+        local_start = local_end - num_new_tokens
+        cache_k[:, local_start:local_end] = k
+        cache_v[:, local_start:local_end] = v
+
+        attn_start = max(0, local_end - max_attention_size)
+        k_cache = cache_k[:, attn_start:local_end]
+        v_cache = cache_v[:, attn_start:local_end]
+
+        q = q.permute(0, 2, 1, 3)
+        k_cache = k_cache.permute(0, 2, 1, 3)
+        v_cache = v_cache.permute(0, 2, 1, 3)
+        out = F.scaled_dot_product_attention(q, k_cache, v_cache, is_causal=False)
+        out = out.permute(0, 2, 1, 3).contiguous()
+
+        kv_cache["global_end_index"].fill_(current_end)
+        kv_cache["local_end_index"].fill_(local_end)
+
+        out = rearrange(out, "b s n d -> b s (n d)")
+        return self.o(out)
+
+
+class CachedCrossAttention(nn.Module):
+    """Cross-attention with persistent cached K/V for static text context."""
+
+    def __init__(self, dim: int, num_heads: int, eps: float = 1e-6) -> None:
+        super().__init__()
+        self.dim = dim
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads
+
+        self.q = nn.Linear(dim, dim)
+        self.k = nn.Linear(dim, dim)
+        self.v = nn.Linear(dim, dim)
+        self.o = nn.Linear(dim, dim)
+        self.norm_q = RMSNorm(dim, eps=eps)
+        self.norm_k = RMSNorm(dim, eps=eps)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        context: torch.Tensor,
+        cache: dict[str, torch.Tensor | bool] | None,
+    ) -> torch.Tensor:
+        q = rearrange(self.norm_q(self.q(x)), "b s (n d) -> b n s d", n=self.num_heads)
+
+        if cache is not None and bool(cache.get("is_init", False)):
+            k = cache["k"]
+            v = cache["v"]
+        else:
+            k = rearrange(self.norm_k(self.k(context)), "b s (n d) -> b n s d", n=self.num_heads)
+            v = rearrange(self.v(context), "b s (n d) -> b n s d", n=self.num_heads)
+            if cache is not None:
+                cache["k"] = k
+                cache["v"] = v
+                cache["is_init"] = True
+
+        out = F.scaled_dot_product_attention(q, k, v, is_causal=False)
+        out = rearrange(out, "b n s d -> b s (n d)")
+        return self.o(out)
+
+
+class Gate(nn.Module):
+    def forward(self, x: torch.Tensor, gate: torch.Tensor, residual: torch.Tensor) -> torch.Tensor:
+        return x + gate * residual
+
+
+class LingBotWorldFastBlock(nn.Module):
+    """Causal transformer block with optional camera/action injection."""
+
+    def __init__(
+        self,
+        dim: int,
+        ffn_dim: int,
+        num_heads: int,
+        local_attn_size: int = -1,
+        sink_size: int = 0,
+        qk_norm: bool = True,
+        cross_attn_norm: bool = True,
+        eps: float = 1e-6,
+    ) -> None:
+        super().__init__()
+        self.self_attn = CausalSelfAttention(
+            dim=dim,
+            num_heads=num_heads,
+            local_attn_size=local_attn_size,
+            sink_size=sink_size,
+            qk_norm=qk_norm,
+            eps=eps,
+        )
+        self.cross_attn = CachedCrossAttention(dim=dim, num_heads=num_heads, eps=eps)
+        self.norm1 = LayerNorm(dim, eps=eps, elementwise_affine=False)
+        self.norm2 = LayerNorm(dim, eps=eps, elementwise_affine=False)
+        self.norm3 = LayerNorm(dim, eps=eps) if cross_attn_norm else nn.Identity()
+        self.ffn = nn.Sequential(
+            nn.Linear(dim, ffn_dim),
+            nn.GELU(approximate="tanh"),
+            nn.Linear(ffn_dim, dim),
+        )
+        self.modulation = nn.Parameter(torch.randn(1, 6, dim) / dim**0.5)
+        self.gate = Gate()
+
+        self.cam_injector_layer1 = nn.Linear(dim, dim)
+        self.cam_injector_layer2 = nn.Linear(dim, dim)
+        self.cam_scale_layer = nn.Linear(dim, dim)
+        self.cam_shift_layer = nn.Linear(dim, dim)
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        t_mod: torch.Tensor,
+        context: torch.Tensor,
+        freqs_cos: torch.Tensor,
+        freqs_sin: torch.Tensor,
+        grid_size: tuple[int, int, int],
+        kv_cache: dict[str, torch.Tensor],
+        crossattn_cache: dict[str, torch.Tensor | bool],
+        current_start: int,
+        max_attention_size: int,
+        control_tokens: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        modulation = self.modulation.to(dtype=t_mod.dtype, device=t_mod.device)
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (
+            modulation.unsqueeze(0) + t_mod
+        ).chunk(6, dim=2)
+
+        shift_msa = shift_msa.squeeze(2)
+        scale_msa = scale_msa.squeeze(2)
+        gate_msa = gate_msa.squeeze(2)
+        shift_mlp = shift_mlp.squeeze(2)
+        scale_mlp = scale_mlp.squeeze(2)
+        gate_mlp = gate_mlp.squeeze(2)
+
+        attn_in = self.norm1(x) * (1 + scale_msa) + shift_msa
+        attn_out = self.self_attn(
+            attn_in,
+            freqs_cos=freqs_cos,
+            freqs_sin=freqs_sin,
+            grid_size=grid_size,
+            kv_cache=kv_cache,
+            current_start=current_start,
+            max_attention_size=max_attention_size,
+        )
+        x = self.gate(x, gate_msa, attn_out)
+
+        if control_tokens is not None:
+            hidden = self.cam_injector_layer2(F.silu(self.cam_injector_layer1(control_tokens)))
+            hidden = hidden + control_tokens
+            x = (1.0 + self.cam_scale_layer(hidden)) * x + self.cam_shift_layer(hidden)
+
+        x = x + self.cross_attn(self.norm3(x), context, crossattn_cache)
+        mlp_in = self.norm2(x) * (1 + scale_mlp) + shift_mlp
+        x = self.gate(x, gate_mlp, self.ffn(mlp_in))
+        return x
+
+
+class LingBotWorldFastHead(nn.Module):
+    """Output projection head."""
+
+    def __init__(self, dim: int, out_dim: int, patch_size: tuple[int, int, int], eps: float = 1e-6) -> None:
+        super().__init__()
+        self.patch_size = patch_size
+        self.norm = LayerNorm(dim, eps=eps, elementwise_affine=False)
+        self.head = nn.Linear(dim, out_dim * math.prod(patch_size))
+        self.modulation = nn.Parameter(torch.randn(1, 2, dim) / dim**0.5)
+
+    def forward(self, x: torch.Tensor, t: torch.Tensor) -> torch.Tensor:
+        modulation = self.modulation.to(dtype=t.dtype, device=t.device)
+        shift, scale = (modulation.unsqueeze(0) + t.unsqueeze(2)).chunk(2, dim=2)
+        shift = shift.squeeze(2)
+        scale = scale.squeeze(2)
+        return self.head(self.norm(x) * (1 + scale) + shift)
+
+
+class LingBotWorldFastDiT(BaseModel):
+    """LingBot-World-Fast causal DiT backbone."""
+
+    def __init__(
+        self,
+        patch_size: tuple[int, int, int] = (1, 2, 2),
+        text_len: int = 512,
+        in_dim: int = 32,
+        dim: int = 5120,
+        ffn_dim: int = 13824,
+        freq_dim: int = 256,
+        text_dim: int = 4096,
+        out_dim: int = 16,
+        num_heads: int = 40,
+        num_layers: int = 40,
+        local_attn_size: int = -1,
+        sink_size: int = 0,
+        qk_norm: bool = True,
+        cross_attn_norm: bool = True,
+        eps: float = 1e-6,
+        control_type: str = "cam",
+    ) -> None:
+        super().__init__()
+        self.patch_size = patch_size
+        self.text_len = text_len
+        self.in_dim = in_dim
+        self.dim = dim
+        self.ffn_dim = ffn_dim
+        self.freq_dim = freq_dim
+        self.text_dim = text_dim
+        self.out_dim = out_dim
+        self.num_heads = num_heads
+        self.num_layers = num_layers
+        self.local_attn_size = local_attn_size
+        self.sink_size = sink_size
+        self.control_type = control_type
+        self.dtype = torch.bfloat16
+        self.layer_name_list = ["blocks"]
+
+        control_dim = 6 if control_type == "cam" else 7
+        control_patch_dim = control_dim * 64 * patch_size[0] * patch_size[1] * patch_size[2]
+
+        self.patch_embedding = nn.Conv3d(in_dim, dim, kernel_size=patch_size, stride=patch_size)
+        self.patch_embedding_wancamctrl = nn.Linear(control_patch_dim, dim)
+        self.c2ws_hidden_states_layer1 = nn.Linear(dim, dim)
+        self.c2ws_hidden_states_layer2 = nn.Linear(dim, dim)
+
+        self.text_embedding = nn.Sequential(
+            nn.Linear(text_dim, dim),
+            nn.GELU(approximate="tanh"),
+            nn.Linear(dim, dim),
+        )
+        self.time_embedding = nn.Sequential(
+            nn.Linear(freq_dim, dim),
+            nn.SiLU(),
+            nn.Linear(dim, dim),
+        )
+        self.time_projection = nn.Sequential(nn.SiLU(), nn.Linear(dim, dim * 6))
+
+        self.blocks = nn.ModuleList(
+            [
+                LingBotWorldFastBlock(
+                    dim=dim,
+                    ffn_dim=ffn_dim,
+                    num_heads=num_heads,
+                    local_attn_size=local_attn_size,
+                    sink_size=sink_size,
+                    qk_norm=qk_norm,
+                    cross_attn_norm=cross_attn_norm,
+                    eps=eps,
+                )
+                for _ in range(num_layers)
+            ]
+        )
+        self.head = LingBotWorldFastHead(dim=dim, out_dim=out_dim, patch_size=patch_size, eps=eps)
+
+        head_dim = dim // num_heads
+        if head_dim % 2 != 0:
+            raise ValueError(f"head_dim={head_dim} must be even for RoPE")
+        freqs = precompute_freqs_cis_3d(head_dim)
+        self.freqs_cos = torch.cat([f.real for f in freqs], dim=-1)
+        self.freqs_sin = torch.cat([f.imag for f in freqs], dim=-1)
+
+        self.init_weights()
+
+    def init_weights(self) -> None:
+        for module in self.modules():
+            if isinstance(module, nn.Linear):
+                nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.zeros_(module.bias)
+
+        nn.init.xavier_uniform_(self.patch_embedding.weight.flatten(1))
+        nn.init.xavier_uniform_(self.patch_embedding_wancamctrl.weight)
+        nn.init.zeros_(self.patch_embedding_wancamctrl.bias)
+        nn.init.zeros_(self.head.head.weight)
+        if self.head.head.bias is not None:
+            nn.init.zeros_(self.head.head.bias)
+
+    def _build_timestep_embeddings(self, t: torch.Tensor, seq_len: int) -> tuple[torch.Tensor, torch.Tensor]:
+        time_dtype = self.time_embedding[0].weight.dtype
+        if t.dim() == 1:
+            emb_input = sinusoidal_embedding_1d(self.freq_dim, t).to(dtype=time_dtype)
+            emb = self.time_embedding(emb_input)
+            t_mod = self.time_projection(emb).unflatten(1, (6, self.dim)).unsqueeze(1).expand(-1, seq_len, -1, -1)
+            return emb.unsqueeze(1).to(self.dtype), t_mod.to(self.dtype)
+
+        flat = t.flatten()
+        emb_input = sinusoidal_embedding_1d(self.freq_dim, flat).to(dtype=time_dtype)
+        emb = self.time_embedding(emb_input)
+        emb = emb.unflatten(0, (t.shape[0], seq_len))
+        t_mod = self.time_projection(emb).unflatten(2, (6, self.dim))
+        return emb.to(self.dtype), t_mod.to(self.dtype)
+
+    def _prepare_control_tokens(self, control_tensor: torch.Tensor | None) -> torch.Tensor | None:
+        if control_tensor is None:
+            return None
+
+        control_tensor = control_tensor.to(
+            device=self.patch_embedding_wancamctrl.weight.device,
+            dtype=self.patch_embedding_wancamctrl.weight.dtype,
+        )
+        control_tokens = rearrange(
+            control_tensor,
+            "b c (f p1) (h p2) (w p3) -> b (f h w) (c p1 p2 p3)",
+            p1=self.patch_size[0],
+            p2=self.patch_size[1],
+            p3=self.patch_size[2],
+        )
+        control_tokens = self.patch_embedding_wancamctrl(control_tokens)
+        hidden = self.c2ws_hidden_states_layer2(F.silu(self.c2ws_hidden_states_layer1(control_tokens)))
+        return control_tokens + hidden
+
+    def patchify(self, x: torch.Tensor) -> tuple[torch.Tensor, tuple[int, int, int]]:
+        x = self.patch_embedding(x)
+        grid_size = x.shape[2:]
+        return rearrange(x, "b c f h w -> b (f h w) c").contiguous(), grid_size
+
+    def unpatchify(self, x: torch.Tensor, grid_size: tuple[int, int, int]) -> torch.Tensor:
+        return rearrange(
+            x,
+            "b (f h w) (p1 p2 p3 c) -> b c (f p1) (h p2) (w p3)",
+            f=grid_size[0],
+            h=grid_size[1],
+            w=grid_size[2],
+            p1=self.patch_size[0],
+            p2=self.patch_size[1],
+            p3=self.patch_size[2],
+        )
+
+    def forward(
+        self,
+        x: torch.Tensor,
+        timestep: torch.Tensor,
+        context: torch.Tensor,
+        y: torch.Tensor | None = None,
+        control_tensor: torch.Tensor | None = None,
+        kv_cache: list[dict[str, torch.Tensor]] | None = None,
+        crossattn_cache: list[dict[str, torch.Tensor | bool]] | None = None,
+        current_start: int = 0,
+        max_attention_size: int = 1_000_000,
+    ) -> torch.Tensor:
+        if y is not None:
+            x = torch.cat([x, y], dim=1)
+
+        x, grid_size = self.patchify(x)
+        seq_len = x.shape[1]
+        t_head, t_mod = self._build_timestep_embeddings(timestep, seq_len)
+        context = self.text_embedding(context)
+        control_tokens = self._prepare_control_tokens(control_tensor)
+
+        freqs_cos = self.freqs_cos.to(device=x.device)
+        freqs_sin = self.freqs_sin.to(device=x.device)
+
+        if kv_cache is None or crossattn_cache is None:
+            raise ValueError("LingBotWorldFastDiT requires kv_cache and crossattn_cache")
+
+        for idx, block in enumerate(self.blocks):
+            x = block(
+                x,
+                t_mod=t_mod,
+                context=context,
+                freqs_cos=freqs_cos,
+                freqs_sin=freqs_sin,
+                grid_size=grid_size,
+                kv_cache=kv_cache[idx],
+                crossattn_cache=crossattn_cache[idx],
+                current_start=current_start,
+                max_attention_size=max_attention_size,
+                control_tokens=control_tokens,
+            )
+
+        x = self.head(x, t_head)
+        return self.unpatchify(x, grid_size)
+
+    @classmethod
+    def from_pretrained(
+        cls,
+        pretrained_model_name_or_path: str,
+        torch_dtype: torch.dtype = torch.bfloat16,
+        control_type: str = "cam",
+        config: dict[str, Any] | None = None,
+    ) -> "LingBotWorldFastDiT":
+        state_path = pretrained_model_name_or_path
+        if not str(state_path).endswith((".safetensors", ".bin", ".pt", ".pth", ".ckpt")):
+            base = pretrained_model_name_or_path.rstrip("/")
+            candidate = f"{base}/diffusion_pytorch_model.safetensors"
+            if os.path.exists(candidate):
+                state_path = candidate
+            else:
+                index_candidate = f"{candidate}.index.json"
+                state_path = index_candidate if os.path.exists(index_candidate) else candidate
+
+        logger.info(f"Loading LingBot-World-Fast DiT from {state_path}")
+        state_dict = load_state_dict(state_path)
+        config = dict(config or {})
+        config.setdefault("control_type", control_type)
+
+        patch_weight = state_dict["patch_embedding.weight"]
+        out_dim = int(state_dict["head.head.bias"].shape[0] // math.prod(config.get("patch_size", (1, 2, 2))))
+        control_patch_weight = state_dict["patch_embedding_wancamctrl.weight"]
+        dim = int(patch_weight.shape[0])
+        patch_size = tuple(config.get("patch_size", (1, 2, 2)))
+        control_patch_volume = math.prod(patch_size) * 64
+
+        inferred_config = {
+            "patch_size": patch_size,
+            "text_len": int(config.get("text_len", 512)),
+            "in_dim": int(patch_weight.shape[1]),
+            "dim": dim,
+            "ffn_dim": int(state_dict["blocks.0.ffn.0.weight"].shape[0]),
+            "freq_dim": int(config.get("freq_dim", 256)),
+            "text_dim": int(state_dict["text_embedding.0.weight"].shape[1]),
+            "out_dim": out_dim,
+            "num_heads": int(config.get("num_heads", 40)),
+            "num_layers": len({k.split(".")[1] for k in state_dict if k.startswith("blocks.")}),
+            "local_attn_size": int(config.get("local_attn_size", -1)),
+            "sink_size": int(config.get("sink_size", 0)),
+            "qk_norm": bool(config.get("qk_norm", True)),
+            "cross_attn_norm": bool(config.get("cross_attn_norm", True)),
+            "eps": float(config.get("eps", 1e-6)),
+            "control_type": control_type,
+        }
+        inferred_control_dim = int(control_patch_weight.shape[1] // control_patch_volume)
+        if inferred_control_dim not in (6, 7):
+            raise ValueError(f"Unexpected control patch dim: {inferred_control_dim}")
+        inferred_config["control_type"] = "cam" if inferred_control_dim == 6 else "act"
+
+        with init_weights_on_device("meta"):
+            model = cls(**inferred_config)
+
+        model.load_state_dict(state_dict, strict=False, assign=True)
+        model = model.to(dtype=torch_dtype)
+        return model
+
+    @staticmethod
+    def state_dict_converter():
+        raise NotImplementedError("LingBotWorldFastDiT uses from_pretrained() for now")
+
+    def get_fsdp_module_names(self) -> list[str]:
+        return ["blocks"]
+
+    def get_tp_plan(self) -> dict[str, Any]:
+        return {}

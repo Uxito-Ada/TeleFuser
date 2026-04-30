@@ -139,13 +139,24 @@ class FrameGeneratorTrack(MediaStreamTrack):
         self._finished = False
         self._start_time: float | None = None
         self._last_frame: av.VideoFrame | None = None
+        self._placeholder_width = 640
+        self._placeholder_height = 360
 
     def push_frame(self, frame: av.VideoFrame) -> None:
         """Push a decoded frame directly (used by ChunkRouter in bidirectional mode)."""
+        self._placeholder_width = frame.width
+        self._placeholder_height = frame.height
         try:
             self._queue.put_nowait(frame)
         except asyncio.QueueFull:
             pass
+
+    def signal_done(self) -> None:
+        self._finished = True
+
+    def _make_placeholder_frame(self) -> av.VideoFrame:
+        image = np.zeros((self._placeholder_height, self._placeholder_width, 3), dtype=np.uint8)
+        return av.VideoFrame.from_ndarray(image, format="rgb24")
 
     async def _consume_generator(self) -> None:
         try:
@@ -195,6 +206,14 @@ class FrameGeneratorTrack(MediaStreamTrack):
                 raise MediaStreamError("Track ended")
             if self._last_frame is not None:
                 frame = self._last_frame
+            elif self._generator is None:
+                try:
+                    frame = await asyncio.wait_for(self._queue.get(), timeout=0.25)
+                    self._last_frame = frame
+                except asyncio.TimeoutError:
+                    if self._finished:
+                        raise MediaStreamError("Track ended — no frames received")
+                    frame = self._make_placeholder_frame()
             else:
                 try:
                     frame = await asyncio.wait_for(self._queue.get(), timeout=10.0)

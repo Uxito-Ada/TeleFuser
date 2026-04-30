@@ -15,6 +15,8 @@ from __future__ import annotations
 import argparse
 import functools
 import http.server
+import json
+import os
 import threading
 import webbrowser
 
@@ -52,6 +54,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
 <script>
 const SERVER_URL = "{server_url}";
+const RTC_CONFIG = {rtc_config};
 let pc = null;
 let sessionId = null;
 
@@ -63,7 +66,7 @@ document.getElementById("connect").onclick = async () => {{
   document.getElementById("connect").disabled = true;
 
   try {{
-    pc = new RTCPeerConnection();
+    pc = new RTCPeerConnection(RTC_CONFIG);
     pc.addTransceiver("video", {{ direction: "recvonly" }});
     pc.addTransceiver("audio", {{ direction: "recvonly" }});
 
@@ -150,10 +153,41 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="TeleFuser WebRTC client demo")
     parser.add_argument("--server-url", default=DEFAULT_SERVER_URL, help="Stream server base URL")
     parser.add_argument("--port", type=int, default=DEFAULT_PORT, help="Local HTTP server port")
+    parser.add_argument(
+        "--turn-url",
+        default=os.environ.get("TELEFUSER_TURN_SERVER", ""),
+        help="TURN server URL for browser WebRTC ICE, e.g. turn:localhost:3478?transport=tcp",
+    )
+    parser.add_argument(
+        "--turn-username",
+        default=os.environ.get("TELEFUSER_TURN_USERNAME", ""),
+        help="TURN username; defaults to TELEFUSER_TURN_USERNAME",
+    )
+    parser.add_argument(
+        "--turn-credential",
+        default=os.environ.get("TELEFUSER_TURN_CREDENTIAL", ""),
+        help="TURN credential; defaults to TELEFUSER_TURN_CREDENTIAL",
+    )
+    parser.add_argument(
+        "--force-turn-relay",
+        action="store_true",
+        help="Force WebRTC to use relay candidates only. Useful when testing through SSH port forwarding.",
+    )
     parser.add_argument("--no-open", action="store_true", help="Don't open browser automatically")
     args = parser.parse_args()
 
-    html = HTML_TEMPLATE.format(server_url=args.server_url)
+    rtc_config: dict[str, object] = {}
+    if args.turn_url:
+        turn_server: dict[str, str] = {"urls": args.turn_url}
+        if args.turn_username:
+            turn_server["username"] = args.turn_username
+        if args.turn_credential:
+            turn_server["credential"] = args.turn_credential
+        rtc_config["iceServers"] = [turn_server]
+    if args.force_turn_relay:
+        rtc_config["iceTransportPolicy"] = "relay"
+
+    html = HTML_TEMPLATE.format(server_url=args.server_url, rtc_config=json.dumps(rtc_config))
 
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_GET(self) -> None:
@@ -169,6 +203,8 @@ def main() -> None:
     url = f"http://localhost:{args.port}"
     print(f"Serving WebRTC demo at {url}")
     print(f"Stream server: {args.server_url}")
+    if rtc_config:
+        print(f"WebRTC config: {json.dumps(rtc_config)}")
     print("Press Ctrl+C to stop.\n")
 
     if not args.no_open:

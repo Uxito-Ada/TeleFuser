@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import os
+from collections import defaultdict
 from collections.abc import Generator
 from contextlib import contextmanager
 from typing import Any
@@ -68,6 +70,8 @@ def init_weights_on_device(
 
 def load_state_dict(file_path: str, torch_dtype: torch.dtype | None = None) -> dict[str, torch.Tensor]:
     """Load state dict from file (safetensors or bin)."""
+    if file_path.endswith(".safetensors.index.json"):
+        return load_state_dict_from_safetensors_index(file_path, torch_dtype)
     if file_path.endswith(".safetensors"):
         return load_state_dict_from_safetensors(file_path, torch_dtype)
     return load_state_dict_from_bin(file_path, torch_dtype)
@@ -80,6 +84,40 @@ def load_state_dict_from_safetensors(file_path: str, torch_dtype: torch.dtype | 
         for k in f.keys():
             tensor = f.get_tensor(k)
             state_dict[k] = tensor.to(torch_dtype) if torch_dtype else tensor
+    return state_dict
+
+
+def load_state_dict_from_safetensors_index(
+    index_path: str, torch_dtype: torch.dtype | None = None
+) -> dict[str, torch.Tensor]:
+    """Load a sharded safetensors checkpoint given its index JSON.
+
+    Hugging Face (diffusers/transformers) often shards large checkpoints into:
+    - ``diffusion_pytorch_model.safetensors.index.json`` (maps tensor name -> shard file)
+    - one or more ``model-00001-of-000xx.safetensors`` shard files
+    """
+    with open(index_path, "r", encoding="utf-8") as f:
+        index = json.load(f)
+
+    weight_map = index.get("weight_map")
+    if not isinstance(weight_map, dict) or not weight_map:
+        raise ValueError(f"Invalid safetensors index file (missing weight_map): {index_path}")
+
+    shard_to_keys: dict[str, list[str]] = defaultdict(list)
+    for key, shard_file in weight_map.items():
+        if isinstance(key, str) and isinstance(shard_file, str):
+            shard_to_keys[shard_file].append(key)
+
+    root_dir = os.path.dirname(index_path)
+    state_dict: dict[str, torch.Tensor] = {}
+    for shard_file in sorted(shard_to_keys.keys()):
+        shard_path = os.path.join(root_dir, shard_file)
+        keys = shard_to_keys[shard_file]
+        with safe_open(shard_path, framework="pt", device="cpu") as f:
+            for k in keys:
+                tensor = f.get_tensor(k)
+                state_dict[k] = tensor.to(torch_dtype) if torch_dtype else tensor
+
     return state_dict
 
 

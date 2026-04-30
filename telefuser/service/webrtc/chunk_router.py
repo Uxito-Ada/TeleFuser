@@ -57,6 +57,8 @@ class ChunkRouter:
             logger.error(f"ChunkRouter error: session={self._session_id} {exc}")
         finally:
             self._send_done()
+            if self._video_track is not None:
+                self._video_track.signal_done()
             if self._audio_track is not None:
                 self._audio_track.signal_done()
 
