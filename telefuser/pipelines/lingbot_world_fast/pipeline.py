@@ -155,8 +155,8 @@ class LingBotWorldFastPipeline(BasePipeline):
     def _prepare_image_tensor(self, image: Image.Image, height: int, width: int) -> torch.Tensor:
         image = image.convert("RGB").resize((width, height), Image.BICUBIC)
         array = np.asarray(image, dtype=np.float32) / 255.0
-        tensor = torch.from_numpy(array).permute(2, 0, 1).sub_(0.5).div_(0.5).to(
-            self.vae_device, dtype=self.torch_dtype
+        tensor = (
+            torch.from_numpy(array).permute(2, 0, 1).sub_(0.5).div_(0.5).to(self.vae_device, dtype=self.torch_dtype)
         )
         return tensor
 

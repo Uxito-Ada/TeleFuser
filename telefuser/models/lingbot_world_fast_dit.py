@@ -114,11 +114,7 @@ class CausalSelfAttention(nn.Module):
         global_end = int(kv_cache["global_end_index"].item())
         local_end = int(kv_cache["local_end_index"].item())
 
-        if (
-            self.local_attn_size != -1
-            and current_end > global_end
-            and num_new_tokens + local_end > kv_cache_size
-        ):
+        if self.local_attn_size != -1 and current_end > global_end and num_new_tokens + local_end > kv_cache_size:
             evicted = num_new_tokens + local_end - kv_cache_size
             rolled = local_end - evicted - sink_tokens
             cache_k[:, sink_tokens : sink_tokens + rolled] = cache_k[
@@ -252,9 +248,9 @@ class LingBotWorldFastBlock(nn.Module):
         control_tokens: torch.Tensor | None = None,
     ) -> torch.Tensor:
         modulation = self.modulation.to(dtype=t_mod.dtype, device=t_mod.device)
-        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (
-            modulation.unsqueeze(0) + t_mod
-        ).chunk(6, dim=2)
+        shift_msa, scale_msa, gate_msa, shift_mlp, scale_mlp, gate_mlp = (modulation.unsqueeze(0) + t_mod).chunk(
+            6, dim=2
+        )
 
         shift_msa = shift_msa.squeeze(2)
         scale_msa = scale_msa.squeeze(2)
