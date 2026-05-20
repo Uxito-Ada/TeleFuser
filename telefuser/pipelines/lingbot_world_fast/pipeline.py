@@ -236,6 +236,26 @@ class LingBotWorldFastPipeline(BasePipeline):
             session_config.intrinsics = intrinsics
 
     @staticmethod
+    def _truncate_control_inputs_to_frame_num(
+        poses: object,
+        intrinsics: object,
+        action: object | None,
+        frame_num: int,
+    ) -> tuple[object, object, object | None, int]:
+        requested_frame_num = ((int(frame_num) - 1) // 4) * 4 + 1
+        pose_frame_num = ((len(poses) - 1) // 4) * 4 + 1
+        effective_frame_num = min(requested_frame_num, pose_frame_num)
+
+        trimmed_poses = poses[:effective_frame_num]
+        intrinsics_arr = np.asarray(intrinsics)
+        if intrinsics_arr.ndim > 1:
+            trimmed_intrinsics = intrinsics[:effective_frame_num]
+        else:
+            trimmed_intrinsics = intrinsics
+        trimmed_action = action[:effective_frame_num] if action is not None else None
+        return trimmed_poses, trimmed_intrinsics, trimmed_action, effective_frame_num
+
+    @staticmethod
     def _align_action_frames(action: torch.Tensor, target_frames: int) -> torch.Tensor:
         if action.ndim == 1:
             action = action.unsqueeze(0)
@@ -370,6 +390,15 @@ class LingBotWorldFastPipeline(BasePipeline):
         image_tensor = self._prepare_image_tensor(session_config.image, height, width)
 
         frame_num = ((session_config.frame_num - 1) // 4) * 4 + 1
+        if session_config.poses is not None and session_config.intrinsics is not None:
+            session_config.poses, session_config.intrinsics, session_config.action, frame_num = (
+                self._truncate_control_inputs_to_frame_num(
+                    poses=session_config.poses,
+                    intrinsics=session_config.intrinsics,
+                    action=session_config.action,
+                    frame_num=frame_num,
+                )
+            )
         self._notify_progress(
             progress_callback,
             "encoding_condition_video",
