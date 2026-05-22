@@ -576,18 +576,19 @@ def norm_infer(
     if N > BLOCK_N:
         raise RuntimeError("This layer norm doesn't support feature dim >= 64KB.")
 
-    _norm_infer_kernel_call(
-        x_2d,
-        out,
-        weight if weight is not None else x_2d,
-        bias if bias is not None else x_2d,
-        M,
-        N,
-        eps,
-        is_rms_norm,
-        weight is not None,
-        bias is not None,
-    )
+    with torch.cuda.device(x_2d.device):
+        _norm_infer_kernel_call(
+            x_2d,
+            out,
+            weight if weight is not None else x_2d,
+            bias if bias is not None else x_2d,
+            M,
+            N,
+            eps,
+            is_rms_norm,
+            weight is not None,
+            bias is not None,
+        )
     return out.view(shape)
 
 

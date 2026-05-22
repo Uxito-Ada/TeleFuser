@@ -111,20 +111,21 @@ def _apply_rotary_embedding_kernel(
 
     output = torch.empty_like(x_reshaped) if not is_inplace else x_reshaped
 
-    _rotary_embedding_kernel[grid](
-        x_reshaped,
-        cos,
-        sin,
-        output,
-        num_heads,
-        head_size,
-        num_tokens,
-        x_reshaped.stride(0),
-        cos.stride(0) if cos.dim() > 1 else 0,
-        sin.stride(0) if sin.dim() > 1 else 0,
-        interleaved,
-        is_inplace,
-    )
+    with torch.cuda.device(x_reshaped.device):
+        _rotary_embedding_kernel[grid](
+            x_reshaped,
+            cos,
+            sin,
+            output,
+            num_heads,
+            head_size,
+            num_tokens,
+            x_reshaped.stride(0),
+            cos.stride(0) if cos.dim() > 1 else 0,
+            sin.stride(0) if sin.dim() > 1 else 0,
+            interleaved,
+            is_inplace,
+        )
 
     return output if not is_inplace else None
 

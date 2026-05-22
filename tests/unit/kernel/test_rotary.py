@@ -127,6 +127,27 @@ class TestRotaryEmbedding:
         # With cos=1, sin=0, output should be input
         assert torch.allclose(output, x, atol=1e-5)
 
+    @pytest.mark.multi_gpu
+    @pytest.mark.skipif(torch.cuda.device_count() < 2, reason="Requires at least 2 GPUs")
+    def test_apply_rotary_embedding_uses_tensor_device_not_current_device(self):
+        """Test RoPE launches on the input tensor device when current CUDA device differs."""
+        original_device = torch.cuda.current_device()
+        try:
+            tensor_device = torch.device("cuda:1")
+            with torch.cuda.device(0):
+                dtype = torch.bfloat16
+                x = torch.randn(2, 8, 4, 64, dtype=dtype, device=tensor_device)
+                cos = torch.randn(8, 32, dtype=dtype, device=tensor_device)
+                sin = torch.randn(8, 32, dtype=dtype, device=tensor_device)
+
+                output_triton = apply_rotary_embedding(x, cos, sin)
+                output_torch = torch_apply_rotary_embedding(x.float(), cos.float(), sin.float()).to(dtype)
+
+            assert output_triton.device == tensor_device
+            assert torch.allclose(output_triton, output_torch, atol=1e-2, rtol=1e-2)
+        finally:
+            torch.cuda.set_device(original_device)
+
 
 # =============================================================================
 # RoPE Interleaved Format Tests

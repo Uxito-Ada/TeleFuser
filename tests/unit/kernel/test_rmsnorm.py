@@ -297,3 +297,29 @@ class TestNormInfer:
 
         assert result.data_ptr() == out.data_ptr()
         assert result.shape == x.shape
+
+    @pytest.mark.multi_gpu
+    @pytest.mark.skipif(torch.cuda.device_count() < 2, reason="Requires at least 2 GPUs")
+    def test_norm_infer_uses_tensor_device_not_current_device(self):
+        """Test norm_infer launches on the input tensor device when current CUDA device differs."""
+        original_device = torch.cuda.current_device()
+        try:
+            tensor_device = torch.device("cuda:1")
+            with torch.cuda.device(0):
+                dtype = torch.bfloat16
+                x = torch.randn(2, 16, 64, dtype=dtype, device=tensor_device)
+                weight = torch.randn(64, dtype=dtype, device=tensor_device)
+
+                output_triton = norm_infer(x, weight, None, eps=1e-6, is_rms_norm=True)
+                output_torch = torch_norm_infer(
+                    x.float(),
+                    weight.float(),
+                    None,
+                    eps=1e-6,
+                    is_rms_norm=True,
+                ).to(dtype)
+
+            assert output_triton.device == tensor_device
+            assert torch.allclose(output_triton, output_torch, atol=1e-2, rtol=1e-2)
+        finally:
+            torch.cuda.set_device(original_device)
