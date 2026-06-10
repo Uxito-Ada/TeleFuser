@@ -13,54 +13,74 @@
   <img src="https://img.shields.io/badge/CUDA-12.8%2B-green" alt="CUDA">
 </p>
 
-TeleFuser is a high-performance framework for multimodal generation model inference, supporting image generation, video generation, and video super-resolution pipelines.
+TeleFuser is a high-performance runtime for world model inference and multimodal generation. It is designed for continuous, low-latency, stateful visual generation workloads such as real-time world models, interactive agents, speech-driven animation, and streaming visual systems.
 
-## Overview
+## Why TeleFuser
 
-TeleFuser is designed to provide optimized inference for large-scale multimodal generation models. The framework features a modular architecture with stage-based pipeline composition, unified API design for both local and server deployment, and comprehensive optimization techniques.
+Real-time world models need a different runtime profile: continuous execution, streaming output, bidirectional interaction, stateful sessions, long-context efficiency, and stable performance under concurrency. TeleFuser focuses on those runtime problems directly.
 
-## Features
+The project treats a world model as more than a function that returns a single clip. It provides the infrastructure needed to run a model as a continuously updated system that can receive input, keep state, and emit frames progressively.
 
-- **Stage-based Pipeline Architecture**: Modular pipeline design composed of reusable stages (text encoding, denoising, VAE, etc.) for flexible model orchestration
-- **Unified API Design**: Consistent API interface for both local Python calls and server deployment
-- **Asynchronous Pipeline Scheduling**: Stage-level async execution with parallel group scheduling and shared resource locking for concurrent request processing
-- **Distributed Parallelism**: Multi-GPU processing with Ray framework, supporting data parallelism, tensor parallelism, and sequence parallelism (Ulysses/Ring/USP)
-- **Quantization Support**: FP8 quantization for reduced memory footprint
-- **LoRA Loading**: Runtime LoRA weight loading for inference with fine-tuned models
-- **Custom Attention Implementations**: Optimized attention kernels including SageAttention, FlashAttention, and sparse attention variants
-- **Memory Optimization**: Flexible CPU offloading strategies and intelligent weight caching for large model support
-- **Feature Caching**: AdaTaylorCache for Wan2.1/2.2 models with precomputed skip steps and hybrid Taylor-residual approximation
-- **REST API Server**: FastAPI server with OpenAI-compatible endpoints (`/v1/images`, `/v1/videos`) and native API (`/v1/tasks/*`)
-- **HuggingFace Format Support**: Load models from HuggingFace Hub or local folders in Diffusers format
+## What TeleFuser Provides
 
-## Installation
+- **World-model-oriented runtime**: Support for continuous video generation, interactive sessions, and bidirectional control loops.
+- **AI Dev First interfaces**: Pipelines can publish `PIPELINE_CONTRACT` / `PIPELINE_MANIFEST` metadata so agents and services can discover tasks, inputs, and parameters programmatically.
+- **Asynchronous pipeline scheduling**: Stage-based execution with request isolation, resource locking, and parallel stage groups.
+- **Streaming transport**: WebRTC-based streaming with media tracks plus DataChannel control for real-time inference.
+- **Scalable GPU runtime**: Multi-GPU execution with tensor parallelism, sequence parallelism, Ray-based deployment, and distributed worker orchestration.
+- **Inference optimization stack**: Triton kernels, optimized attention backends, quantization, offload, and feature caching.
+- **Unified serving**: Local Python API, `telefuser serve` for task APIs, and `telefuser stream-serve` for continuous streaming services.
+
+## World Model Inference Focus
+
+TeleFuser is built around the runtime requirements that world models expose in production:
+
+- **Continuous execution instead of one-shot calls**: stream frames as they are produced instead of waiting for full completion.
+- **Interactive control**: accept prompts, controls, images, audio, or action signals while a session is active.
+- **Stateful sessions**: keep runtime state across chunks rather than rebuilding the full pipeline every step.
+- **Low first-frame latency**: expose partial outputs quickly through async scheduling and streaming transport.
+- **Long-horizon efficiency**: reduce memory pressure for long videos and repeated denoising through sequence parallelism, offload, and caching.
+
+Today that maps to concrete capabilities in this repo, including:
+
+- bidirectional WebRTC sessions for `LingBot-World-Fast`
+- speech-to-video generation for `LiveAct`
+- streaming video processing for `FlashVSR`
+- long-form and continuation workflows for `LongCat-Video`
+- batch and async video generation for `WanVideo`, `HunyuanVideo`, and `LTX Video`
+
+## Quick Start
+
+### Install
 
 ```bash
 pip install -e .
 ```
 
-For development installation:
+For development:
 
 ```bash
 pip install -e ".[dev]"
 ```
 
-## Quick Start
+For WebRTC streaming:
 
-### Basic Usage
+```bash
+pip install -e ".[webrtc]"
+```
+
+### 1. Batch Video Inference
 
 ```python
 from telefuser.pipelines.wan_video.wan21_video import Wan21VideoPipeline
 import torch
 
-# Load from HuggingFace Hub
 pipe = Wan21VideoPipeline.from_pretrained(
     model_id_or_path="Wan-AI/Wan2.1-T2V-1.3B",
     device="cuda",
     torch_dtype=torch.bfloat16,
 )
 
-# Generate video
 video = pipe(
     prompt="A cat playing piano",
     num_frames=81,
@@ -69,239 +89,193 @@ video = pipe(
 )
 ```
 
-### Examples
+### 2. Real-Time World Model Demo
 
-📁 **See the `examples/` directory for complete working examples:**
+TeleFuser includes a bidirectional WebRTC demo for `LingBot-World-Fast`.
 
-| Pipeline | Task | Examples | Features & Performance |
-|----------|------|----------|------------------------|
-| **WanVideo** | T2V, I2V, FL2V | `examples/wan_video/` | [README](examples/wan_video/README.md) |
-| **Qwen-Image** | T2I, Edit | `examples/qwen_image/` | [README](examples/qwen_image/README.md) |
-| **Z-Image** | T2I | `examples/z_image/` | [README](examples/z_image/README.md) |
-| **HunyuanVideo** | T2V, I2V | `examples/hunyuan_video/` | [README](examples/hunyuan_video/README.md) |
-| **FlashVSR** | VSR | `examples/flashvsr/` | [README](examples/flashvsr/README.md) |
-| **LongCat-Video** | T2V, I2V | `examples/longcat_video/` | [README](examples/longcat_video/README.md) |
-| **LTX Video** | I2V + Audio | `examples/ltx_video/` | [README](examples/ltx_video/README.md) |
-| **Flux2 Klein** | T2I | `examples/flux2_klein/` | [README](examples/flux2_klein/README.md) |
-| **LiveAct** | S2V | `examples/liveact/` | Speech-to-Video (talking head) |
+```bash
+export LINGBOT_WORLD_CHECKPOINT_DIR=/path/to/LingBot-World
 
-> 💡 **Tip:** Click the README links above to see detailed features, model sources, and performance metrics for each pipeline.
+telefuser stream-serve examples/stream_server/stream_lingbot_world_fast.py \
+  -p 8088 \
+  --skip-validation
 
-Run any example with `--help` to see available options:
+python examples/stream_server/webrtc_bidirectional_demo.py \
+  --server-url http://localhost:8088 \
+  --image-path /path/to/input.png
+```
+
+This starts a continuous session where the client sends control messages over a WebRTC DataChannel and receives generated video frames over media tracks.
+
+### 3. Batch Service Mode
+
+```bash
+telefuser serve examples/wan_video/wan22_14b_text_to_video_service.py --port 8000
+```
+
+TeleFuser exposes:
+
+- native task APIs under `/v1/tasks/*`
+- OpenAI-compatible image and video APIs under `/v1/images` and `/v1/videos`
+- service metadata that reflects the pipeline contract
+
+See [docs/en/service.md](docs/en/service.md) for full API details.
+
+## Serving Modes
+
+### `telefuser serve`
+
+Use this mode for request-response inference with task management, standard REST APIs, and service metadata.
+
+- good fit for batch text-to-video, image-to-video, image generation, and super-resolution
+- supports pipeline contracts for structured parameter exposure
+- supports OpenAI-compatible routes for easier client integration
+
+### `telefuser stream-serve`
+
+Use this mode for continuous streaming workloads.
+
+- server-push WebRTC for progressive video output
+- bidirectional WebRTC for interactive control loops
+- useful for real-time world models, speech-driven generation, and streaming media pipelines
+
+See [docs/en/stream_server.md](docs/en/stream_server.md) for stream protocol details.
+
+## AI Dev First Runtime
+
+TeleFuser is designed so pipelines are understandable not only to human developers, but also to automated systems and agents.
+
+- `PIPELINE_CONTRACT` and `PIPELINE_MANIFEST` define supported tasks, required file inputs, defaults, and user-facing parameters.
+- the service layer uses those contracts to expose machine-readable metadata
+- the same pipeline can be used locally, through REST APIs, or through streaming services
+
+This is the core of the project's "AI Dev First" direction: standardize runtime behavior so orchestration systems can discover and use pipelines without reverse-engineering internal code paths.
+
+## Architecture
+
+TeleFuser uses a layered runtime architecture that maps cleanly to the repository structure:
+
+1. **Access layer**: FastAPI task APIs and WebRTC streaming entrypoints.
+2. **Service and scheduling layer**: request routing, task management, stream sessions, and orchestration.
+3. **Pipeline abstraction layer**: stage-based pipelines with async execution, request isolation, and resource locks.
+4. **Model and optimization layer**: model loading, attention selection, quantization, offload, LoRA, and cache integration.
+5. **Execution backend layer**: optimized ops, Triton kernels, and device-specific implementations.
+
+Relevant directories:
+
+```text
+telefuser/
+├── service/         # REST APIs, streaming APIs, WebRTC integration
+├── orchestrator/    # Pipeline orchestration
+├── pipelines/       # Model-specific pipelines
+├── distributed/     # TP / SP / FSDP / Ray utilities
+├── feature_cache/   # AdaTaylorCache
+├── ops/             # Compile-aware operator dispatch
+├── kernel/triton/   # Triton kernels
+└── models/          # DiT, VAE, encoders, decoders
+```
+
+## Runtime Capabilities
+
+- **Async pipeline scheduling**: run independent stages concurrently and gate shared resources with lock groups.
+- **Distributed inference**: tensor parallelism, sequence parallelism, Ray-based multi-GPU deployment, and pipeline-scale orchestration.
+- **Attention backends**: Torch SDPA, FlashAttention, SageAttention, sparse attention variants, and other configurable implementations.
+- **Feature caching**: `AdaTaylorCache` accelerates supported diffusion models with calibrated skip/reuse logic.
+- **Memory optimization**: CPU offload, weight reuse, and runtime-aware loading strategies for large video models.
+- **Quantization**: FP8 and INT8-related runtime support where the model/backend path allows it.
+- **Streaming output**: progressive frame delivery over WebRTC with optional audio tracks.
+
+## Supported Pipelines
+
+### World Model and Real-Time Oriented
+
+| Pipeline | Task | Notes |
+|----------|------|-------|
+| `LingBot-World-Fast` | Bidirectional world-model streaming | Interactive WebRTC control loop via [examples/stream_server/stream_lingbot_world_fast.py](examples/stream_server/stream_lingbot_world_fast.py) |
+| `LiveAct` | S2V | Speech-driven talking head generation via [examples/liveact/liveact_s2v_h100.py](examples/liveact/liveact_s2v_h100.py) |
+| `FlashVSR` | VSR | Streaming video super-resolution via [examples/flashvsr/README.md](examples/flashvsr/README.md) |
+| `LongCat-Video` | T2V, I2V, VC | Long-form generation and continuation via [examples/longcat_video/README.md](examples/longcat_video/README.md) |
+
+### Video Generation
+
+| Pipeline | Task | Notes |
+|----------|------|-------|
+| `WanVideo` (Wan2.1 / Wan2.2) | T2V, I2V, FL2V | Main video generation family, including async and service examples in [examples/wan_video/README.md](examples/wan_video/README.md) |
+| `HunyuanVideo` | T2V, I2V | Supported via [examples/hunyuan_video/README.md](examples/hunyuan_video/README.md) |
+| `LTX Video` | I2V + Audio | Unified audio-video generation via [examples/ltx_video/README.md](examples/ltx_video/README.md) |
+
+### Image Generation and Other Multimodal Pipelines
+
+| Pipeline | Task | Notes |
+|----------|------|-------|
+| `Qwen-Image` | T2I, Edit | [examples/qwen_image/README.md](examples/qwen_image/README.md) |
+| `Z-Image` | T2I | [examples/z_image/README.md](examples/z_image/README.md) |
+| `Flux2 Klein` | T2I | [examples/flux2_klein/README.md](examples/flux2_klein/README.md) |
+
+## Examples
+
+Key entry points:
+
+- [examples/wan_video/README.md](examples/wan_video/README.md)
+- [examples/longcat_video/README.md](examples/longcat_video/README.md)
+- [examples/liveact/liveact_s2v_h100.py](examples/liveact/liveact_s2v_h100.py)
+- [examples/flashvsr/README.md](examples/flashvsr/README.md)
+- [examples/ltx_video/README.md](examples/ltx_video/README.md)
+- [examples/stream_server/stream_lingbot_world_fast.py](examples/stream_server/stream_lingbot_world_fast.py)
+- [examples/stream_server/webrtc_bidirectional_demo.py](examples/stream_server/webrtc_bidirectional_demo.py)
+
+To inspect CLI options for an example:
 
 ```bash
 python examples/wan_video/wan21_1_3b_text_to_video_hf.py --help
 ```
 
-Examples that support `telefuser serve` can also declare a pipeline contract through `PIPELINE_MANIFEST`,
-`PIPELINE_CONTRACT`, or the corresponding factory functions. The server uses that contract to determine supported
-tasks, required file inputs, and user-facing request parameters instead of exposing every internal pipeline knob.
+The [examples/README.md](examples/README.md) file documents the example runner and baseline comparison workflow.
 
-📖 See [Adding New Example](docs/en/adding_new_example.md) for authoring rules and [Service Documentation](docs/en/service.md)
-for how the server consumes the contract.
+## Documentation
 
-## Architecture Highlights
-
-### Asynchronous Pipeline Scheduling
-
-TeleFuser provides a stage-based asynchronous scheduling engine for concurrent request processing:
-
-- **Parallel Stage Groups**: Independent stages (e.g., text encoding and VAE encoding) execute concurrently within parallel groups
-- **Shared Resource Locking**: Stages accessing shared resources use configurable lock groups to prevent contention
-- **Request Isolation**: Each request maintains independent state and queues
-- **Event-Driven Execution**: Non-blocking async/await patterns throughout the pipeline
-
-Example async usage:
-```python
-from telefuser.pipelines.wan_video import AsyncWan22VideoPipeline
-
-pipe = AsyncWan22VideoPipeline(device="cuda")
-pipe.init(module_manager, config)
-
-async for event in pipe.agenerate(
-    request_id="demo-1",
-    prompt="A beautiful landscape",
-    input_image=image,
-):
-    if event["type"] == "stage_end":
-        print(f"Stage {event['stage']['name']} completed")
-    elif event["type"] == "final":
-        print(f"Video saved to {event['payload']['artifacts'][0]['uri']}")
-```
-
-## CLI Usage
-
-TeleFuser provides a command-line interface for easy access to its functionality:
-
-```bash
-# Start API server
-telefuser serve ./examples/wan_video/wan21_14b_image_to_video_h100.py --port 8000
-
-# With multi-GPU support
-telefuser serve ./examples/wan_video/wan21_14b_image_to_video_h100.py --task i2v --port 8000 --gpu-num 2
-
-# Start stream server (WebRTC / WebSocket)
-telefuser stream-serve examples/stream_server/stream_video_replay.py -p 8088
-
-# Validate a pipeline file
-telefuser validate /path/to/pipeline.py
-
-# Scan directory for pipeline files
-telefuser scan /path/to/pipelines/
-```
-
-All example scripts support command-line parameters. Use `--help` to see available options:
-
-```bash
-python examples/wan_video/wan21_1_3b_text_to_video_h100.py --help
-```
-
-📖 **For detailed CLI usage, API reference, and server configuration, see [Service Documentation](docs/en/service.md).**
-
-## API Server
-
-TeleFuser provides a FastAPI-based REST API server with dual API support:
-
-- **TeleFuser Native API** (`/v1/tasks/*`) - Async task management
-- **OpenAI Compatible API** (`/v1/images`, `/v1/videos`) - Industry-standard format
-
-```bash
-# Start the server
-telefuser serve /path/to/pipeline.py --port 8000
-```
-
-When a pipeline file provides a manifest/contract, `telefuser serve` uses it as the source of truth for:
-
-- supported tasks such as `t2v`, `i2v`, `fl2v`, and `vc`
-- required upload inputs such as images or videos
-- user-facing request defaults and required fields
-- service metadata returned by `/v1/service/metadata`
-
-Keep user-facing parameters in the contract, and keep internal tuning values in `PPL_CONFIG` or implementation code.
-
-📖 **For detailed API documentation, client SDK, and examples, see [Service Documentation](docs/en/service.md).**
-
-## Stream Server
-
-TeleFuser also provides a real-time stream server for continuous video delivery:
-
-- **WebRTC** (Server Push) — low-latency video + audio streaming to the browser
-- **WebSocket** (Bidirectional) — duplex communication for interactive generation (e.g., speech-to-video)
-
-```bash
-# Start the stream server with a pipeline
-telefuser stream-serve examples/stream_server/stream_video_replay.py -p 8088
-
-# Open the WebRTC client demo
-python examples/stream_server/webrtc_client_demo.py --server-url http://localhost:8088
-```
-
-Stream pipelines implement a simple protocol (`start` / `stop` / `serve`) and can be used with any video generation model.
-
-📖 **For stream server usage, pipeline authoring, and API reference, see [Stream Server Documentation](docs/en/stream_server.md).**
-
-## Configuration
-
-### Model Paths
-
-Configure model paths in your pipeline configuration:
-
-```python
-PPL_CONFIG = dict(
-    dit_path=["/path/to/dit/model-*.safetensors"],
-    vae_path=["/path/to/vae/model.safetensors"],
-    text_encoder_path=["/path/to/text_encoder/model-*.safetensors"],
-)
-```
-
-### HuggingFace Format Loading
-
-Load models directly from HuggingFace Hub or local directories:
-
-```python
-from telefuser.pipelines.wan_video.wan21_video import Wan21VideoPipeline
-
-pipe = Wan21VideoPipeline.from_pretrained(
-    model_id_or_path="Wan-AI/Wan2.1-T2V-1.3B",  # HF Model ID or local path
-    device="cuda",
-    torch_dtype=torch.bfloat16,
-)
-```
-
-### Performance Optimization
-
-- Use `attn_impl=AttnImplType.SAGE_ATTN_2_8_8_SM90` for optimized attention on H100 GPUs
-- Enable FP8 quantization for reduced memory usage
-- Configure parallel processing for multi-GPU setups
-
-📖 **For more configuration details, see:**
-- [Model Loading Guide](docs/en/model_loading.md) - Using ModuleManager for model loading
-- [Adding New Models](docs/en/adding_new_model.md) - Guide for integrating new models
-- [Ops Module Documentation](docs/en/ops.md) - Neural network operator implementations
-- [Parallel Inference Guide](docs/en/parallel.md) - Distributed parallel inference architecture and usage
-- [Attention Implementation Guide](docs/en/attention.md) - Attention configuration and backends
-- [Logging Guide](docs/en/logging.md) - Logging system configuration and usage
-- [Metrics Guide](docs/en/metrics.md) - Metrics collection and monitoring
-
-## Supported Pipelines
-
-| Pipeline | Task | Features & Performance |
-|----------|------|------------------------|
-| **WanVideo** (Wan2.1/2.2) | T2V, I2V, FL2V | [Examples README](examples/wan_video/README.md) |
-| **Qwen-Image** | T2I, Edit | [Examples README](examples/qwen_image/README.md) |
-| **Z-Image** | T2I | [Examples README](examples/z_image/README.md) |
-| **HunyuanVideo** | T2V, I2V | [Examples README](examples/hunyuan_video/README.md) |
-| **FlashVSR** | VSR | [Examples README](examples/flashvsr/README.md) |
-| **LongCat-Video** | T2V, I2V | [Examples README](examples/longcat_video/README.md) |
-| **LTX Video** | I2V + Audio | [Examples README](examples/ltx_video/README.md) |
-| **Flux2 Klein** | T2I | [Examples README](examples/flux2_klein/README.md) |
-| **LiveAct** | S2V | Speech-to-Video (talking head generation) |
-
-> 💡 See each pipeline's README for detailed feature support matrix and performance benchmarks.
+- [docs/en/service.md](docs/en/service.md): REST serving, task APIs, OpenAI-compatible APIs
+- [docs/en/stream_server.md](docs/en/stream_server.md): continuous streaming and WebRTC protocols
+- [docs/en/parallel.md](docs/en/parallel.md): distributed inference architecture
+- [docs/en/feature_cache.md](docs/en/feature_cache.md): `AdaTaylorCache`
+- [docs/en/model_loading.md](docs/en/model_loading.md): model loading patterns
+- [docs/en/attention.md](docs/en/attention.md): attention backends and configuration
+- [docs/en/torch_compile_compatibility.md](docs/en/torch_compile_compatibility.md): compile-related constraints
+- [docs/en/adding_new_model.md](docs/en/adding_new_model.md): integrating new models
+- [docs/en/adding_new_example.md](docs/en/adding_new_example.md): authoring examples and pipeline contracts
 
 ## Known Limitations
 
-- **Feature Cache**: Currently supports Wan2.1, Wan2.2, Qwen-Image, and HunyuanVideo models
-- **Compile**: Torch compile support is experimental, see [torch.compile Compatibility Guide](docs/en/torch_compile_compatibility.md)
-- **Multi-Machine**: Distributed inference across multiple machines is not yet tested
-- **GPU Requirements**: Some features (FP8, SageAttention) require specific GPU architectures (H100+)
-- **Model Coverage**: Only selected models are tested; other Diffusers models may require adaptation
+- `AdaTaylorCache` is only calibrated for selected model families.
+- `torch.compile` support is still experimental in parts of the stack.
+- Some optimized paths require specific GPU architectures and CUDA versions.
+- World-model examples such as `LingBot-World-Fast` require external checkpoints and environment setup.
+- Multi-machine deployment exists in the architecture but may require project-specific integration and validation.
 
 ## Development
-
-We adopt PEP8 as our code style.
-
-Quick setup:
 
 ```bash
 pip install -e ".[dev]"
 pre-commit install
+pytest tests/
 ```
 
-📖 **For detailed contribution guidelines, testing documentation, and development workflow, see [CONTRIBUTING.md](CONTRIBUTING.md).**
+See [CONTRIBUTING.md](CONTRIBUTING.md) for contribution workflow and [AGENTS.md](AGENTS.md) for project-specific agent guidance.
 
 ## License
 
-Apache 2.0 License - See LICENSE file for details.
-
-## Contributing
-
-Contributions are welcome! Please see the project repository for contribution guidelines.
+Apache 2.0 License. See [LICENSE](LICENSE).
 
 ## Acknowledgements
 
-This project builds upon and is inspired by many excellent open-source projects:
+TeleFuser builds on and is inspired by a broad set of open-source efforts in multimodal generation and inference systems, including:
 
-- [DiffSynth-Studio](https://github.com/modelscope/DiffSynth-Studio) - Diffusion model engine by ModelScope Community
-- [DiffSynth-Engine](https://github.com/modelscope/DiffSynth-Engine) - High-performance diffusion inference engine
-- [LightX2V](https://github.com/ModelTC/LightX2V) - Lightweight image/video generation inference framework
-- [cache-dit](https://github.com/vipshop/cache-dit) - PyTorch-native caching for DiT models
-- [Wan2.1](https://github.com/Wan-Video/Wan2.1) / [Wan2.2](https://github.com/Wan-Video/Wan2.2) - Video generation models
-- [diffusers](https://github.com/huggingface/diffusers) - State-of-the-art diffusion models library
-- [Qwen-Image](https://github.com/QwenLM/Qwen-Image) - Image generation foundation model
-- [Z-Image](https://github.com/Tongyi-MAI/Z-Image) - Photorealistic image generation with bilingual text rendering
-- [FlashVSR](https://github.com/OpenImagingLab/FlashVSR) - Real-time diffusion-based video super-resolution
-
-## Support
-
-For issues and questions, please check the project documentation or create an issue in the repository.
+- [DiffSynth-Studio](https://github.com/modelscope/DiffSynth-Studio)
+- [DiffSynth-Engine](https://github.com/modelscope/DiffSynth-Engine)
+- [LightX2V](https://github.com/ModelTC/LightX2V)
+- [cache-dit](https://github.com/vipshop/cache-dit)
+- [diffusers](https://github.com/huggingface/diffusers)
+- [Wan2.1](https://github.com/Wan-Video/Wan2.1) / [Wan2.2](https://github.com/Wan-Video/Wan2.2)
+- [Qwen-Image](https://github.com/QwenLM/Qwen-Image)
+- [Z-Image](https://github.com/Tongyi-MAI/Z-Image)
+- [FlashVSR](https://github.com/OpenImagingLab/FlashVSR)
