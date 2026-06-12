@@ -1,0 +1,11 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 📖 Documentation
+    url: https://github.com/lzx1413/TeleFuser/tree/main/docs/en
+    about: Check the documentation before opening an issue
+  - name: 💬 Discussions
+    url: https://github.com/lzx1413/TeleFuser/discussions
+    about: Ask questions, share ideas, and discuss with the community
+  - name: 🔒 Security Vulnerability
+    url: https://github.com/lzx1413/TeleFuser/security/advisories/new
+    about: Report security vulnerabilities privately through GitHub Security Advisories

@@ -1,0 +1,125 @@
+name: Roadmap Item
+description: Propose a quarterly or version milestone plan for TeleFuser development
+title: "[ROADMAP] "
+labels: ["roadmap"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for contributing to the TeleFuser roadmap!
+        Each roadmap item represents a **milestone-level** comprehensive plan
+        (e.g. a quarter or a version release) covering multiple areas of work.
+        Use the deliverables checklist to track progress across all areas.
+
+  - type: input
+    id: milestone
+    attributes:
+      label: Milestone
+      description: The quarter or version this roadmap targets (e.g. Q3 2026, v0.2.0)
+      placeholder: "Q3 2026 / v0.2.0"
+    validations:
+      required: true
+
+  - type: textarea
+    id: goal
+    attributes:
+      label: Overall Goal
+      description: A concise summary of what this milestone aims to achieve
+      placeholder: |
+        Expand model coverage to Wan2.2 and LTX Video Audio,
+        improve multi-GPU inference throughput by 2x,
+        and stabilize the streaming API for production use.
+    validations:
+      required: true
+
+  - type: textarea
+    id: deliverables_models
+    attributes:
+      label: 🧠 New Model Integrations
+      description: Planned model pipeline integrations, new model support, or model upgrades
+      placeholder: |
+        - [ ] Wan2.2 T2V / I2V / FL2V pipeline
+        - [ ] LTX Video Audio generation pipeline
+        - [ ] HunyuanVideo 1.5 I2V mode
+
+  - type: textarea
+    id: deliverables_perf
+    attributes:
+      label: ⚡ Performance & Kernels
+      description: Planned kernel optimizations, attention improvements, caching, and quantization
+      placeholder: |
+        - [ ] FlashAttention 3 integration for Wan2.2
+        - [ ] AdaTaylorCache for HunyuanVideo
+        - [ ] FP8 quantization for DiT layers
+        - [ ] Fused kernel batch for RMSNorm + scale/shift
+
+  - type: textarea
+    id: deliverables_dist
+    attributes:
+      label: 🔗 Distributed Inference
+      description: "Planned distributed inference improvements: SP, TP, PP, Ring Attention, offloading"
+      placeholder: |
+        - [ ] Ring Attention refactor for long-video (>60s)
+        - [ ] Ulysses SP degree auto-tuning
+        - [ ] Pipeline parallelism for HunyuanVideo
+        - [ ] Smart CPU offload for multi-GPU setups
+
+  - type: textarea
+    id: deliverables_api
+    attributes:
+      label: 🌐 API & Service
+      description: "Planned service/API improvements: streaming, metadata, client SDK, deployment"
+      placeholder: |
+        - [ ] Streaming response API (chunked video output)
+        - [ ] Service metadata endpoint
+        - [ ] Ray cluster auto-scaling
+        - [ ] Health check & metrics dashboard
+
+  - type: textarea
+    id: deliverables_docs
+    attributes:
+      label: 📚 Documentation & Tooling
+      description: Planned docs, tooling, CI, and developer experience improvements
+      placeholder: |
+        - [ ] English docs overhaul for all pipelines
+        - [ ] Benchmark suite with regression detection
+        - [ ] CLI `telefuser profile` command
+        - [ ] Pre-commit hook update for ruff
+
+  - type: textarea
+    id: risks
+    attributes:
+      label: Dependencies & Risks
+      description: External dependencies, blockers, and risk factors that could impact this milestone
+      placeholder: |
+        - Depends on upstream Wan2.2 model release
+        - PyTorch 2.6+ required for new kernel ops
+        - Multi-GPU testing requires 4× A100 cluster
+
+  - type: textarea
+    id: metrics
+    attributes:
+      label: Success Metrics
+      description: How will we measure whether this milestone is successfully completed?
+      placeholder: |
+        - Wan2.2 T2V throughput ≥ 30 frames/min on single A100
+        - Multi-GPU (4×A100) speedup ≥ 3x vs single GPU
+        - Streaming API latency < 200ms for first chunk
+        - Zero P0 bugs in production deployment
+        - All new pipelines have unit tests and documentation
+
+  - type: textarea
+    id: progress
+    attributes:
+      label: Progress Tracking
+      description: Update this section as work progresses. Link completed items to PRs/issues.
+      value: |
+        ## Status: 🔜 Not Started
+
+        | Area | Progress | Key PRs/Issues |
+        |------|----------|----------------|
+        | New Models | ⬜ 0/N | |
+        | Performance | ⬜ 0/N | |
+        | Distributed | ⬜ 0/N | |
+        | API & Service | ⬜ 0/N | |
+        | Docs & Tooling | ⬜ 0/N | |

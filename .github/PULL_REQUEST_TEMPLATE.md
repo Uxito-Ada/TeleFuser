@@ -22,22 +22,23 @@
 
 ## Testing
 <!-- Describe the tests you ran and how to reproduce them -->
-- [ ] Unit tests pass (`make test`)
+- [ ] Unit tests pass (`pytest tests/`)
 - [ ] Manual testing performed
 - [ ] Benchmarks added/updated (if applicable)
 
 Test commands:
 ```bash
 # Add the commands used to test your changes
+pytest tests/
 ```
 
 ## Checklist
 <!-- Mark completed items with [x] -->
-- [ ] Code follows the project's coding standards (`make format`)
+- [ ] Code follows the project's coding standards (`ruff`)
 - [ ] Pre-commit hooks pass (`pre-commit run --all-files`)
-- [ ] All tests pass (`make test`)
+- [ ] All tests pass (`pytest tests/`)
 - [ ] New tests added for new functionality
-- [ ] Documentation updated (README, AGENTS.md, docstrings)
+- [ ] Documentation updated (README, CLAUDE.md, docstrings)
 - [ ] Commit messages are clear and descriptive
 - [ ] PR title follows the convention: `[TYPE] Brief description`
 
