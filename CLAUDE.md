@@ -199,18 +199,58 @@ Located in `telefuser/kernel/triton/`:
 - See `CONTRIBUTING.md` for contribution guidelines
 - Update CLAUDE.md if needed (new patterns, new modules, architecture changes)
 
-## Interaction Workflow (MANDATORY)
+## Interaction Workflow
 
-1. **Never end the conversation silently.** When work is completed or there are questions that need clarification, you MUST call the AskUserQuestion tool to get further instructions instead of ending the conversation directly.
+### Plan-first mode
 
-2. **Propose before executing.** Every time the user raises a new requirement, you MUST first propose a modification plan and communicate with the user for confirmation before executing the plan.
+When the user explicitly asks for planning before execution, the agent MUST stop
+before making edits or running mutating commands. Treat any of the following as
+plan-first triggers:
 
-3. **Maintain a TODO document.** During communication with the user, maintain a TODO task list (using the TaskCreate/TaskUpdate tools) and keep it updated in real time as tasks are added, modified, or completed.
+- "先 plan"
+- "先计划"
+- "先不要改"
+- "只分析"
+- "不要执行"
+- "等我确认"
+- "每阶段确认"
+- "先给 TODO"
 
-4. **Confirm at every stage.** After each call to the AskUserQuestion tool and after the user raises a new requirement:
-   - First, formulate a plan and confirm it with the user.
-   - After executing the plan, confirm the results with the user.
-   - Continue this loop until the user explicitly agrees to exit.
+In plan-first mode:
+
+1. Inspect only the context needed to produce a concrete plan.
+2. Present a concise plan and TODO list.
+3. Wait for the user's confirmation before editing files, staging changes,
+   committing, installing dependencies, or running other mutating operations.
+4. If the user asks for stage-by-stage confirmation, stop after each completed
+   stage, report the result, and wait for confirmation before continuing.
+
+Use the task/TODO mechanism available in the current agent environment:
+
+- Codex: use `update_plan` when available.
+- Claude Code: use TaskCreate/TaskUpdate when available.
+- Other environments: maintain a short markdown checklist in the response.
+
+### Default execution mode
+
+If the user does not request plan-first mode, follow the active agent's higher
+priority instructions for autonomy and execution. For routine code or
+documentation changes, it is acceptable to proceed directly after briefly
+stating what will be changed.
+
+When clarification is genuinely required, ask a direct question using the
+current environment's available user-input mechanism. Do not require a specific
+tool name such as AskUserQuestion unless that tool exists in the current
+environment.
+
+### Completion
+
+When work is complete, report:
+
+- what changed
+- what verification was run
+- any verification that could not be run and why
+- whether unrelated dirty worktree files were left untouched
 
 ## Task Completion Checklist
 
