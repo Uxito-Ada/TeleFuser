@@ -187,7 +187,7 @@ def test_create_session_limits_stream_generation_to_20_seconds() -> None:
         )
 
 
-def test_create_session_initializes_fixed_intrinsics_from_action_path() -> None:
+def test_create_session_initializes_fixed_intrinsics_from_intrinsics_path() -> None:
     pipeline = MagicMock()
     service = LingBotWorldFastService(pipeline)
     intrinsics = np.asarray([[8.0, 8.0, 4.0, 4.0], [9.0, 9.0, 4.0, 4.0]])
@@ -196,11 +196,11 @@ def test_create_session_initializes_fixed_intrinsics_from_action_path() -> None:
         session_id = service.create_session(
             {
                 "image": Image.new("RGB", (8, 8)),
-                "action_path": "/controls",
+                "intrinsics_path": "/controls/intrinsics.npy",
             }
         )
 
-    load.assert_called_once_with(Path("/controls") / "intrinsics.npy")
+    load.assert_called_once_with(Path("/controls/intrinsics.npy"))
     session_config = pipeline.control_context.call_args.args[0]
     assert session_config.intrinsics is intrinsics
     assert service._sessions[session_id].control_context is pipeline.control_context.return_value

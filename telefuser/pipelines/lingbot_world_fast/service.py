@@ -103,8 +103,8 @@ class LingBotWorldFastService:
         session_id = config.get("session_id") or str(uuid.uuid4())
         image = self._load_image(config)
         intrinsics = config.get("intrinsics")
-        if intrinsics is None and config.get("action_path"):
-            intrinsics = np.load(Path(config["action_path"]) / "intrinsics.npy")
+        if intrinsics is None and config.get("intrinsics_path"):
+            intrinsics = np.load(Path(config["intrinsics_path"]))
 
         fps = int(config.get("fps") or self.default_fps)
         frame_num = int(config.get("frame_num", 81))

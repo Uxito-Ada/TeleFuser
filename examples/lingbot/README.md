@@ -216,7 +216,7 @@ python examples/stream_server/webrtc_bidirectional_demo.py \
     --server-url http://127.0.0.1:8088 \
     --port 8091 \
     --image-path examples/data/lingbot_world_fast/image.jpg \
-    --action-path examples/data/lingbot_world_fast \
+    --intrinsics-path examples/data/lingbot_world_fast/intrinsics.npy \
     --frame-num 321 \
     --chunk-size 3 \
     --sample-shift 10.0 \
@@ -291,7 +291,7 @@ env -u TELEFUSER_TURN_SERVER \
     --server-url http://127.0.0.1:8088 \
     --port 8091 \
     --image-path examples/data/lingbot_world_fast/image.jpg \
-    --action-path examples/data/lingbot_world_fast \
+    --intrinsics-path examples/data/lingbot_world_fast/intrinsics.npy \
     --frame-num 321 \
     --chunk-size 3 \
     --sample-shift 10.0 \
@@ -301,9 +301,9 @@ env -u TELEFUSER_TURN_SERVER \
 
 Open `http://localhost:8091` in the browser on that machine.
 
-`--image-path` and `--action-path` are paths on the remote host. In real-time `cam` mode, `image.jpg` supplies the
-initial frame, only the first row of `intrinsics.npy` is used as fixed intrinsics, and `poses.npy` is not replayed;
-camera poses are generated from live controls.
+`--image-path` and `--intrinsics-path` are paths on the remote host. In real-time `cam` mode, `image.jpg` supplies the
+initial frame, `--intrinsics-path` supplies the fixed camera intrinsics, and `poses.npy` is not replayed; camera poses
+are generated from live controls.
 
 ### Camera Controls
 

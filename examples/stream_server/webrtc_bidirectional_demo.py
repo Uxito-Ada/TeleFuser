@@ -668,8 +668,8 @@ HTML_TEMPLATE = r"""<!DOCTYPE html>
           </div>
         </div>
         <div class="field">
-          <label for="action-path">Control file path</label>
-          <input id="action-path" type="text" placeholder="Optional poses/action directory">
+          <label for="intrinsics-path">Camera intrinsics path</label>
+          <input id="intrinsics-path" type="text" placeholder="Optional intrinsics.npy path">
         </div>
         <div class="grid">
           <div class="field">
@@ -823,7 +823,7 @@ function fillDefaults() {
   $("sample-shift").value = DEFAULT_OPTIONS.sample_shift ?? 10.0;
   $("seed").value = DEFAULT_OPTIONS.seed ?? 42;
   $("control-mode").value = DEFAULT_OPTIONS.control_mode || "cam";
-  $("action-path").value = DEFAULT_OPTIONS.action_path || "";
+  $("intrinsics-path").value = DEFAULT_OPTIONS.intrinsics_path || "";
   $("control-move-step").value = DEFAULT_OPTIONS.control_move_step ?? 0.05;
   $("control-yaw-step").value = DEFAULT_OPTIONS.control_yaw_step_degrees ?? 2.0;
   $("control-lateral-step").value = DEFAULT_OPTIONS.control_lateral_step ?? 0.05;
@@ -883,11 +883,11 @@ function requestOptionsFromForm() {
     control_pitch_limit_degrees: DEFAULT_OPTIONS.control_pitch_limit_degrees ?? 85.0,
     show_control_hud: $("show-control-hud").checked,
   };
-  const actionPath = $("action-path").value.trim();
-  if (actionPath) {
-    options.action_path = actionPath;
+  const intrinsicsPath = $("intrinsics-path").value.trim();
+  if (intrinsicsPath) {
+    options.intrinsics_path = intrinsicsPath;
   } else {
-    delete options.action_path;
+    delete options.intrinsics_path;
   }
   return options;
 }
@@ -1157,7 +1157,7 @@ def main() -> None:
     parser.add_argument("--max-attention-size", type=int, default=None, help="Optional LingBot max attention size")
     parser.add_argument("--max-sequence-length", type=int, default=512, help="LingBot max text sequence length")
     parser.add_argument("--control-mode", default="cam", choices=("cam", "act"), help="LingBot control mode")
-    parser.add_argument("--action-path", default="", help="Optional LingBot camera/action control directory")
+    parser.add_argument("--intrinsics-path", default="", help="Optional LingBot camera intrinsics .npy path")
     parser.add_argument("--control-move-step", type=float, default=0.05, help="LingBot video-frame move step")
     parser.add_argument(
         "--control-yaw-step-degrees",
@@ -1254,8 +1254,8 @@ def main() -> None:
     }
     if args.max_attention_size is not None:
         request_options["max_attention_size"] = args.max_attention_size
-    if args.action_path:
-        request_options["action_path"] = args.action_path
+    if args.intrinsics_path:
+        request_options["intrinsics_path"] = args.intrinsics_path
 
     # When proxying, the browser should call the demo origin (no separate port forward needed for --server-url).
     server_url_for_browser = "" if args.proxy_backend else args.server_url

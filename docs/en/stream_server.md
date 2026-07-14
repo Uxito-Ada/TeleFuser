@@ -636,7 +636,7 @@ python examples/stream_server/webrtc_bidirectional_demo.py \
   --server-url http://127.0.0.1:8088 \
   --port 8091 \
   --image-path examples/data/lingbot_world_fast/image.jpg \
-  --action-path examples/data/lingbot_world_fast \
+  --intrinsics-path examples/data/lingbot_world_fast/intrinsics.npy \
   --frame-num 321 \
   --chunk-size 3 \
   --sample-shift 10.0 \
@@ -691,8 +691,8 @@ is occupied, use `-L 13478:127.0.0.1:3478` and pass
 `--turn-url 'turn:localhost:13478?transport=tcp'` to the browser demo. Do not change the server-side
 `TELEFUSER_TURN_SERVER`, which still connects to coturn at remote port 3478.
 
-`--image-path` and `--action-path` are server-side paths, not laptop-local paths. For real-time keyboard control,
-the service loads only `intrinsics.npy` from `--action-path` and keeps its first row fixed for the session. The demo
+`--image-path` and `--intrinsics-path` are server-side paths, not laptop-local paths. For real-time keyboard control,
+the service loads `--intrinsics-path` and keeps its first row fixed for the session. The demo
 enables proxying by default; the browser only needs to access the demo port. Requests to `/v1/stream/webrtc/*` are
 forwarded by the demo process to `--server-url`.
 
@@ -727,7 +727,7 @@ env -u TELEFUSER_TURN_SERVER \
   --server-url http://127.0.0.1:8088 \
   --port 8091 \
   --image-path examples/data/lingbot_world_fast/image.jpg \
-  --action-path examples/data/lingbot_world_fast \
+  --intrinsics-path examples/data/lingbot_world_fast/intrinsics.npy \
   --frame-num 321 \
   --chunk-size 3 \
   --sample-shift 10.0 \

@@ -635,7 +635,7 @@ python examples/stream_server/webrtc_bidirectional_demo.py \
   --server-url http://127.0.0.1:8088 \
   --port 8091 \
   --image-path examples/data/lingbot_world_fast/image.jpg \
-  --action-path examples/data/lingbot_world_fast \
+  --intrinsics-path examples/data/lingbot_world_fast/intrinsics.npy \
   --frame-num 321 \
   --chunk-size 3 \
   --sample-shift 10.0 \
@@ -689,8 +689,8 @@ ssh -N \
 浏览器 demo 参数改为 `--turn-url 'turn:localhost:13478?transport=tcp'`。服务端的
 `TELEFUSER_TURN_SERVER` 不需要修改，它仍然连接远端服务器上的 coturn 3478 端口。
 
-`--image-path` 和 `--action-path` 都是服务端路径，不是笔记本本地路径。实时键盘控制只会从
-`--action-path` 加载 `intrinsics.npy`，并在整个会话中固定使用第一行内参。demo 默认开启代理，浏览器只需
+`--image-path` 和 `--intrinsics-path` 都是服务端路径，不是笔记本本地路径。实时键盘控制会加载
+`--intrinsics-path`，并在整个会话中固定使用第一行内参。demo 默认开启代理，浏览器只需
 访问 demo 端口；`/v1/stream/webrtc/*` 请求会由 demo 进程转发到 `--server-url`。
 
 #### 浏览器和服务运行在同一台机器
@@ -724,7 +724,7 @@ env -u TELEFUSER_TURN_SERVER \
   --server-url http://127.0.0.1:8088 \
   --port 8091 \
   --image-path examples/data/lingbot_world_fast/image.jpg \
-  --action-path examples/data/lingbot_world_fast \
+  --intrinsics-path examples/data/lingbot_world_fast/intrinsics.npy \
   --frame-num 321 \
   --chunk-size 3 \
   --sample-shift 10.0 \

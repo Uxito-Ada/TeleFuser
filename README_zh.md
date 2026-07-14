@@ -94,7 +94,7 @@ python examples/stream_server/webrtc_bidirectional_demo.py \
   --server-url http://127.0.0.1:8088 \
   --port 8091 \
   --image-path examples/data/lingbot_world_fast/image.jpg \
-  --action-path examples/data/lingbot_world_fast \
+  --intrinsics-path examples/data/lingbot_world_fast/intrinsics.npy \
   --frame-num 321 --chunk-size 3 --sample-shift 10.0 --fps 16 \
   --turn-url 'turn:localhost:3478?transport=tcp' \
   --turn-username telefuser --turn-credential telefuser-turn \
