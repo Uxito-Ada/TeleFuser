@@ -14,7 +14,7 @@ from pathlib import Path
 import cv2
 import numpy as np
 import torch
-from PIL import Image, ImageDraw
+from PIL import Image, ImageDraw, ImageFont
 
 from telefuser.utils.logging import logger
 from telefuser.utils.profiler import ProfilingContext4Debug
@@ -184,6 +184,9 @@ class LingBotWorldFastService:
         control_context = state.control_context or self.pipeline.control_context(state.config)
         width, height = control_context.width, control_context.height
         preview = image.resize((width, height), Image.BICUBIC)
+        frames = [preview]
+        if state.config.show_control_hud:
+            frames = self._overlay_control_hud(frames, controls=None)
         self._put_output(
             state,
             {
@@ -191,7 +194,7 @@ class LingBotWorldFastService:
                 "index": -1,
                 "fps": state.config.fps,
                 "timestamp": time.time(),
-                "frames_b64": self._encode_frames_to_b64([preview]),
+                "frames_b64": self._encode_frames_to_b64(frames),
             },
         )
 
@@ -292,20 +295,53 @@ class LingBotWorldFastService:
         draw.polygon(points, fill=color)
 
     @classmethod
-    def _overlay_control_hud(cls, frames: list[Image.Image], controls: list[str] | None) -> list[Image.Image]:
-        if not controls:
-            return frames
+    def _draw_control_panel(
+        cls,
+        draw: ImageDraw.ImageDraw,
+        left: int,
+        top: int,
+        cell: int,
+        active: set[str],
+        active_fill: tuple[int, int, int, int],
+        outline: tuple[int, int, int, int],
+        label: str,
+    ) -> None:
+        panel_size = cell * 3
+        font = ImageFont.load_default(size=max(12, cell // 3))
+        label_box = draw.textbbox((0, 0), label, font=font)
+        label_width = label_box[2] - label_box[0]
+        label_height = label_box[3] - label_box[1]
+        label_x = left + (panel_size - label_width) // 2
+        label_y = top - label_height - max(4, cell // 10)
+        draw.text((label_x, label_y), label, fill=outline, font=font)
+        draw.rectangle(
+            (left, top, left + panel_size, top + panel_size),
+            fill=(10, 18, 32, 150),
+            outline=outline,
+            width=max(1, cell // 14),
+        )
+        centers = {
+            "up": (left + cell + cell // 2, top + cell // 2),
+            "left": (left + cell // 2, top + cell + cell // 2),
+            "right": (left + cell * 2 + cell // 2, top + cell + cell // 2),
+            "down": (left + cell + cell // 2, top + cell * 2 + cell // 2),
+        }
+        for direction, (center_x, center_y) in centers.items():
+            fill = active_fill if direction in active else (100, 116, 139, 170)
+            cls._draw_triangle(draw, direction, center_x, center_y, cell, fill)
 
-        controls_active = set(controls)
-        active = {
+    @classmethod
+    def _overlay_control_hud(cls, frames: list[Image.Image], controls: list[str] | None) -> list[Image.Image]:
+        controls_active = set(controls or ())
+        movement_active = {
             direction
-            for direction, source_controls in {
-                "up": {"w"},
-                "down": {"s"},
-                "left": {"a", "j"},
-                "right": {"d", "l"},
-            }.items()
-            if controls_active & source_controls
+            for direction, control in {"up": "w", "down": "s", "left": "a", "right": "d"}.items()
+            if control in controls_active
+        }
+        rotation_active = {
+            direction
+            for direction, control in {"up": "i", "down": "k", "left": "j", "right": "l"}.items()
+            if control in controls_active
         }
         out: list[Image.Image] = []
         for frame in frames:
@@ -315,27 +351,28 @@ class LingBotWorldFastService:
             cell = max(28, min(width, height) // 12)
             panel = Image.new("RGBA", image.size, (0, 0, 0, 0))
             draw = ImageDraw.Draw(panel)
-
-            left = pad
-            top = pad
             panel_size = cell * 3
-            draw.rectangle(
-                (left, top, left + panel_size, top + panel_size),
-                fill=(10, 18, 32, 150),
+            top = height - pad - panel_size
+            cls._draw_control_panel(
+                draw,
+                left=pad,
+                top=top,
+                cell=cell,
+                active=movement_active,
+                active_fill=(37, 99, 235, 230),
                 outline=(96, 165, 250, 210),
-                width=max(1, cell // 14),
+                label="MOVE",
             )
-
-            centers = {
-                "up": (left + cell + cell // 2, top + cell // 2),
-                "left": (left + cell // 2, top + cell + cell // 2),
-                "right": (left + cell * 2 + cell // 2, top + cell + cell // 2),
-                "down": (left + cell + cell // 2, top + cell * 2 + cell // 2),
-            }
-            for direction, (cx, cy) in centers.items():
-                is_active = direction in active
-                fill = (37, 99, 235, 230) if is_active else (100, 116, 139, 170)
-                cls._draw_triangle(draw, direction, cx, cy, cell, fill)
+            cls._draw_control_panel(
+                draw,
+                left=width - pad - panel_size,
+                top=top,
+                cell=cell,
+                active=rotation_active,
+                active_fill=(245, 158, 11, 230),
+                outline=(251, 191, 36, 210),
+                label="ROTATE",
+            )
 
             out.append(Image.alpha_composite(image.convert("RGBA"), panel).convert("RGB"))
         return out
@@ -513,7 +550,7 @@ class LingBotWorldFastService:
                 frames = result.frames
                 if not frames:
                     break
-                if state.config.show_control_hud and applied_controls:
+                if state.config.show_control_hud:
                     frames = self._overlay_control_hud(frames, applied_controls)
                 payload = {
                     "type": "chunk",

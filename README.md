@@ -81,6 +81,17 @@ video = pipe(
 
 TeleFuser includes a bidirectional WebRTC demo for `LingBot-World-Fast`.
 
+For a laptop browser connected through VS Code Remote SSH, coturn is the only additional system package required;
+no extra Python package is needed. On Debian or Ubuntu, install it with:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y coturn
+```
+
+The package provides both `turnserver` and the `turnutils_uclient` verification tool. Skip this step when both
+commands already exist, or when the browser and GPU service run on the same physical machine.
+
 ```bash
 TF_MODEL_ZOO_PATH=/path/to/model_zoo \
 CUDA_VISIBLE_DEVICES=0,1,2,3 \

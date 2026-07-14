@@ -81,6 +81,17 @@ video = pipe(
 
 TeleFuser 当前提供了 `LingBot-World-Fast` 的双向 WebRTC Demo。
 
+通过 VS Code Remote SSH 从笔记本浏览器访问时，coturn 是唯一需要额外安装的系统软件，不需要增加
+Python 包。在 Debian 或 Ubuntu 上执行：
+
+```bash
+sudo apt-get update
+sudo apt-get install -y coturn
+```
+
+该软件包同时提供 `turnserver` 和用于验证的 `turnutils_uclient`。如果这两个命令已经存在，或者浏览器
+和 GPU 服务运行在同一台物理机器上，则可以跳过安装。
+
 ```bash
 TF_MODEL_ZOO_PATH=/path/to/model_zoo \
 CUDA_VISIBLE_DEVICES=0,1,2,3 \

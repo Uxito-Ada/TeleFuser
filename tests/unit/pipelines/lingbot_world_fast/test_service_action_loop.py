@@ -137,6 +137,49 @@ def test_wasd_ijkl_and_arrow_aliases_have_distinct_translation_and_rotation_cont
     assert service._direction_from_chunk({"key": "KeyI"}) == "i"
 
 
+def test_control_hud_always_places_movement_and_rotation_at_bottom_corners() -> None:
+    width, height = 832, 480
+    frame = Image.new("RGB", (width, height))
+
+    rendered = LingBotWorldFastService._overlay_control_hud([frame], controls=None)[0]
+
+    changed = np.any(np.asarray(rendered) != np.asarray(frame), axis=2)
+    changed_y, changed_x = np.nonzero(changed)
+    assert changed_y.min() > height // 2
+    assert np.any(changed[:, : width // 2])
+    assert np.any(changed[:, width // 2 :])
+
+
+def test_control_hud_labels_movement_and_rotation_panels() -> None:
+    frame = Image.new("RGB", (832, 480))
+
+    with patch.object(
+        LingBotWorldFastService,
+        "_draw_control_panel",
+        wraps=LingBotWorldFastService._draw_control_panel,
+    ) as draw_panel:
+        LingBotWorldFastService._overlay_control_hud([frame], controls=["w"])
+
+    assert [call.kwargs["label"] for call in draw_panel.call_args_list] == ["MOVE", "ROTATE"]
+
+
+def test_preview_frame_includes_idle_control_hud() -> None:
+    service = LingBotWorldFastService(MagicMock())
+    state = _state()
+    state.control_context = SimpleNamespace(width=832, height=480)
+
+    with (
+        patch.object(service, "_overlay_control_hud", return_value=[Image.new("RGB", (832, 480))]) as overlay,
+        patch.object(service, "_encode_frames_to_b64", return_value=["encoded-frame"]),
+        patch.object(service, "_put_output") as put_output,
+    ):
+        service._emit_preview_frame(state)
+
+    overlay.assert_called_once()
+    assert overlay.call_args.kwargs == {"controls": None}
+    assert put_output.call_args.args[1]["frames_b64"] == ["encoded-frame"]
+
+
 def test_service_stop_closes_sessions_before_pipeline() -> None:
     pipeline = MagicMock()
     service = LingBotWorldFastService(pipeline)
