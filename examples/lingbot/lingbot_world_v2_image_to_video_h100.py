@@ -78,7 +78,7 @@ def get_pipeline(
     """Load LingBot-World v2 for offline chunked generation."""
     if model_root is None or v2_model_root is None:
         default_model_root = str(TF_MODEL_ZOO_PATH / "Wan2.2-I2V-A14B")
-        default_v2_model_root = str(TF_MODEL_ZOO_PATH / "lingbot" / "lingbot-world-v2-14b-causal-fast")
+        default_v2_model_root = str(TF_MODEL_ZOO_PATH / "lingbot" / "lingbot-world-v2-14b-causal-fast" / "transformers")
     else:
         default_model_root, default_v2_model_root = model_root, v2_model_root
     if parallelism < 1:
@@ -183,6 +183,7 @@ def run(
     "--v2_model_root",
     default=None,
     type=click.Path(exists=True, file_okay=False),
+    help="LingBot v2 transformers directory",
 )
 @click.option("--output", default=None, type=click.Path(dir_okay=False), help="Output video path")
 def main(

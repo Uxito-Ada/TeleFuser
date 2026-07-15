@@ -17,14 +17,14 @@ def test_v2_stream_get_pipeline_maps_ppl_config_to_internal_workers() -> None:
         result = stream_example.get_pipeline(
             parallelism=4,
             model_root="/models/Wan2.2-I2V-A14B",
-            v2_model_root="/models/lingbot-world-v2-14b-causal-fast",
+            v2_model_root="/models/lingbot-world-v2-14b-causal-fast/transformers",
         )
 
     assert result is pipeline
     pipeline_cls.assert_called_once_with(device="cuda", torch_dtype=torch.bfloat16)
     config = pipeline.init.call_args.args[0]
     assert config.checkpoint_dir == "/models/Wan2.2-I2V-A14B"
-    assert config.fast_checkpoint_path == "/models/lingbot-world-v2-14b-causal-fast"
+    assert config.fast_checkpoint_path == "/models/lingbot-world-v2-14b-causal-fast/transformers"
     assert config.local_attn_size == 18
     assert config.sink_size == 6
     assert config.timestep_indices == (0, 250, 500, 750)

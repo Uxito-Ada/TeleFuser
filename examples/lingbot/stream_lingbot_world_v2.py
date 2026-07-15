@@ -51,7 +51,7 @@ def get_pipeline(
     if model_root is None or v2_model_root is None:
         model_zoo_path = Path(os.environ["TF_MODEL_ZOO_PATH"]).expanduser()
         default_model_root = str(model_zoo_path / "Wan2.2-I2V-A14B")
-        default_v2_model_root = str(model_zoo_path / "lingbot" / "lingbot-world-v2-14b-causal-fast")
+        default_v2_model_root = str(model_zoo_path / "lingbot" / "lingbot-world-v2-14b-causal-fast" / "transformers")
     else:
         default_model_root, default_v2_model_root = model_root, v2_model_root
     if parallelism < 1:

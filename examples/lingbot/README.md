@@ -13,6 +13,7 @@ ${TF_MODEL_ZOO_PATH}/
 └── lingbot/
     ├── lingbot-world-fast/
     └── lingbot-world-v2-14b-causal-fast/
+        └── transformers/
 ```
 
 Set the model root before running the example:
@@ -63,7 +64,7 @@ and timesteps.
 python examples/lingbot/lingbot_world_v2_image_to_video_h100.py \
     --gpu_num 4 \
     --model_root "${TF_MODEL_ZOO_PATH}/Wan2.2-I2V-A14B" \
-    --v2_model_root "${TF_MODEL_ZOO_PATH}/lingbot/lingbot-world-v2-14b-causal-fast"
+    --v2_model_root "${TF_MODEL_ZOO_PATH}/lingbot/lingbot-world-v2-14b-causal-fast/transformers"
 ```
 
 ## Usage
