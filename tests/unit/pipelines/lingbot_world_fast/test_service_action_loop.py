@@ -303,3 +303,16 @@ def test_pull_chunks_drains_terminal_messages_after_session_becomes_inactive() -
         return [chunk async for chunk in service.pull_chunks("session-a")]
 
     assert asyncio.run(collect()) == [{"type": "preview"}, {"type": "error"}]
+
+
+def test_service_start_warms_the_pipeline_with_its_default_shape() -> None:
+    pipeline = MagicMock()
+    pipeline.config = SimpleNamespace(control_type="cam", orig_width=832, orig_height=480)
+    service = LingBotWorldFastService(pipeline, default_session_config={"chunk_size": 4})
+
+    service.start()
+
+    warmup_config = pipeline.warmup.call_args.args[0]
+    assert warmup_config.image.size == (832, 480)
+    assert warmup_config.chunk_size == 4
+    assert warmup_config.frame_num == 29

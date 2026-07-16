@@ -20,7 +20,7 @@ from telefuser.utils.model_weight import load_state_dict
 from telefuser.utils.profiler import ProfilingContext4Debug
 from telefuser.worker.parallel_worker import ParallelWorker
 
-from .control import LingBotWorldFastControlContext
+from .control import LingBotWorldFastControlBuilder, LingBotWorldFastControlContext
 from .denoising import LingBotWorldFastDenoisingStage
 from .session import (
     LingBotWorldFastChunkRequest,
@@ -347,6 +347,44 @@ class LingBotWorldFastPipeline(BasePipeline):
         denoise_stage = getattr(self, "denoise_stage", None)
         if isinstance(denoise_stage, ParallelWorker):
             denoise_stage.close()
+
+    @torch.inference_mode()
+    def warmup(self, session_config: LingBotWorldFastSessionConfig) -> None:
+        """Run and release first and subsequent chunks to initialize runtime state."""
+        expected_frame_num = 4 * (2 * session_config.chunk_size - 1) + 1
+        if session_config.frame_num != expected_frame_num:
+            raise ValueError(
+                "LingBot warmup requires exactly two complete chunks: "
+                f"expected frame_num={expected_frame_num} for chunk_size={session_config.chunk_size}, "
+                f"got {session_config.frame_num}"
+            )
+
+        control_context = self.control_context(session_config)
+        poses = np.repeat(np.eye(4, dtype=np.float32)[None], control_context.chunk_size, axis=0)
+        action: dict[str, object] = {"poses": poses}
+        if control_context.control_type == "act":
+            action["action"] = np.zeros((control_context.chunk_size, 4), dtype=np.float32)
+
+        session = LingBotWorldFastGenerationSession(config=session_config)
+        try:
+            self(
+                session,
+                LingBotWorldFastChunkRequest(
+                    chunk_index=0,
+                    session_id="warmup",
+                    control=LingBotWorldFastControlBuilder(control_context).defer(action),
+                ),
+            )
+            self(
+                session,
+                LingBotWorldFastChunkRequest(
+                    chunk_index=1,
+                    session_id="warmup",
+                    control=LingBotWorldFastControlBuilder(control_context).defer(action),
+                ),
+            )
+        finally:
+            self.release_session(session)
 
     def __del__(self) -> None:
         """Best-effort fallback for callers that do not explicitly close the pipeline."""

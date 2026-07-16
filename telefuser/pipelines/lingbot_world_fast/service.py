@@ -80,7 +80,29 @@ class LingBotWorldFastService:
         self._sessions: dict[str, LingBotWorldFastSessionState] = {}
 
     def start(self) -> None:
+        self.pipeline.warmup(self._warmup_session_config())
         logger.info("LingBotWorldFastService started")
+
+    def _warmup_session_config(self) -> LingBotWorldFastSessionConfig:
+        """Build a single-chunk request matching the service's default shape."""
+        defaults = self.default_session_config
+        chunk_size = int(defaults.get("chunk_size", 3))
+        if chunk_size <= 0:
+            raise ValueError(f"chunk_size must be positive, got {chunk_size}")
+        config = self.pipeline.config
+        return LingBotWorldFastSessionConfig(
+            prompt=str(defaults.get("prompt", "")),
+            image=Image.new("RGB", (config.orig_width, config.orig_height)),
+            control_mode=str(defaults.get("control_mode", config.control_type)),
+            fps=int(defaults.get("fps", self.default_fps)),
+            chunk_size=chunk_size,
+            frame_num=4 * (2 * chunk_size - 1) + 1,
+            frame_policy="strict",
+            sample_shift=float(defaults.get("sample_shift", 10.0)),
+            seed=int(defaults.get("seed", 42)),
+            max_attention_size=defaults.get("max_attention_size"),
+            max_sequence_length=int(defaults.get("max_sequence_length", 512)),
+        )
 
     def stop(self) -> None:
         for session_id in list(self._sessions.keys()):
