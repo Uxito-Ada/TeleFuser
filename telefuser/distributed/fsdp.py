@@ -67,6 +67,7 @@ def shard_model(
         sharding_strategy=sharding_strategy,
         use_orig_params=False,
         mixed_precision=mixed_precision,
+        forward_prefetch=True,
         auto_wrap_policy=partial(lambda_auto_wrap_policy, lambda_fn=wrap_fn),
         cpu_offload=CPUOffload(offload_params=True) if cpu_offload else None,
     )

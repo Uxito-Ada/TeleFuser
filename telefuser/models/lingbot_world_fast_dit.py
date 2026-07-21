@@ -120,19 +120,21 @@ class CausalSelfAttention(nn.Module):
         max_attention_size: int,
         device_mesh: DeviceMesh | None = None,
     ) -> torch.Tensor:
-        q = rearrange(self.norm_q(self.q(x)), "b s (n d) -> b s n d", n=self.num_heads)
-        k = rearrange(self.norm_k(self.k(x)), "b s (n d) -> b s n d", n=self.num_heads)
-        v = rearrange(self.v(x), "b s (n d) -> b s n d", n=self.num_heads)
-
         group = get_ulysses_group(device_mesh)
         ulysses_enabled = group is not None and get_ulysses_world_size(device_mesh) > 1
+        q = rearrange(self.norm_q(self.q(x)), "b s (n d) -> b s n d", n=self.num_heads)
+        q_wait = ulysses_scatter_heads(q, group) if ulysses_enabled else None
+        k = rearrange(self.norm_k(self.k(x)), "b s (n d) -> b s n d", n=self.num_heads)
+        k_wait = ulysses_scatter_heads(k, group) if ulysses_enabled else None
+        v = rearrange(self.v(x), "b s (n d) -> b s n d", n=self.num_heads)
+        v_wait = ulysses_scatter_heads(v, group) if ulysses_enabled else None
         frame_tokens = grid_size[1] * grid_size[2]
         start_frame = current_start // frame_tokens
         valid_seq_len = math.prod(grid_size)
         if ulysses_enabled:
-            q = ulysses_scatter_heads(q, group)()
-            k = ulysses_scatter_heads(k, group)()
-            v = ulysses_scatter_heads(v, group)()
+            q = q_wait()
+            k = k_wait()
+            v = v_wait()
             padded_seq_len = q.shape[1]
             q = self._apply_causal_rope(q, freqs_cos, freqs_sin, grid_size, start_frame)[:, :valid_seq_len]
             k = self._apply_causal_rope(k, freqs_cos, freqs_sin, grid_size, start_frame)[:, :valid_seq_len]
