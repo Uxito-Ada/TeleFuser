@@ -1,4 +1,4 @@
-"""Base stage for pipeline execution with model offload support."""
+﻿"""Base stage for pipeline execution with model offload support."""
 
 from __future__ import annotations
 
@@ -142,6 +142,29 @@ class BaseStage(ABC):
         """Apply parallelization to models. Override in subclass."""
         pass
 
+    def apply_model_quantization(self, model: Any, runtime_config: ModelRuntimeConfig | None = None) -> None:
+        """Apply explicit runtime quantization config to a model if requested."""
+        runtime_config = runtime_config or self.model_runtime_config
+        quant_config = runtime_config.quant_config
+        if not quant_config.enabled:
+            return
+        if not hasattr(model, "enable_quant"):
+            logger.warning(f"Quantization requested for {self.name}, but model has no enable_quant()")
+            return
+
+        from .config import QuantType
+
+        if quant_config.quant_type in (QuantType.TORCHAO_INT4, QuantType.TORCHAO_FP8):
+            if runtime_config.offload_config.offload_type != WeightOffloadType.NO_CPU_OFFLOAD:
+                raise ValueError(
+                    "TorchAO quantization requires NO_CPU_OFFLOAD because TorchAO tensor subclasses must stay on device"
+                )
+            logger.info(f"onload {self.name} model to {self.device} before TorchAO quantization")
+            model.to(self.device)
+            self.onload_models_flag = True
+
+        model.enable_quant(quant_config)
+
     def setup_feature_cache(
         self,
         model: Any,
@@ -167,3 +190,6 @@ class BaseStage(ABC):
             )
         elif hasattr(model, "_feature_cache") and model._feature_cache is None:
             model.reset_feature_cache()
+
+
+

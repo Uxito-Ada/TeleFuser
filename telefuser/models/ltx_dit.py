@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from copy import deepcopy
 from pathlib import Path
@@ -1500,7 +1500,7 @@ import torch
 class PixArtAlphaTextProjection(torch.nn.Module):
     """
     Projects caption embeddings using dual linear layers.
-    Flow: linear_1 → activation → linear_2
+    Flow: linear_1 鈫?activation 鈫?linear_2
     Adapted from https://github.com/PixArt-alpha/PixArt-alpha/blob/master/diffusion/model/nets/PixArt_blocks.py
     """
 
@@ -2070,6 +2070,44 @@ class LTXVideoTransformer(BaseModel):
         raise NotImplementedError("Tensor parallelism plan is not implemented for LTXVideoTransformer yet.")
 
     def enable_quant(self, quant_type: str | torch.dtype) -> None:
+        from telefuser.core.config import QuantConfig, QuantType
+
+        if isinstance(quant_type, QuantConfig) and quant_type.quant_type == QuantType.NVFP4:
+            from telefuser.ops.nvfp4_linear import replace_linear_layers_with_nvfp4
+
+            replaced = replace_linear_layers_with_nvfp4(
+                self.velocity_model.transformer_blocks,
+                group_size=quant_type.group_size,
+                include_names=quant_type.quantize_modules,
+                exclude_names=quant_type.skip_modules,
+                keep_fp16_weight=quant_type.keep_fp16_weight,
+            )
+            logger.info(f"NVFP4 converted {replaced} Linear layers in LTX transformer blocks")
+            self.quant_type = quant_type.quant_type
+            return
+        if isinstance(quant_type, QuantConfig) and quant_type.quant_type == QuantType.TORCHAO_INT4:
+            from telefuser.ops.torchao_int4_linear import replace_linear_layers_with_torchao_int4
+
+            replaced = replace_linear_layers_with_torchao_int4(
+                self.velocity_model.transformer_blocks,
+                group_size=quant_type.group_size,
+                include_names=quant_type.quantize_modules,
+                exclude_names=quant_type.skip_modules,
+            )
+            logger.info(f"TorchAO INT4 converted {replaced} Linear layers in LTX transformer blocks")
+            self.quant_type = quant_type.quant_type
+            return
+        if isinstance(quant_type, QuantConfig) and quant_type.quant_type == QuantType.TORCHAO_FP8:
+            from telefuser.ops.torchao_fp8_linear import replace_linear_layers_with_torchao_fp8
+
+            replaced = replace_linear_layers_with_torchao_fp8(
+                self.velocity_model.transformer_blocks,
+                include_names=quant_type.quantize_modules,
+                exclude_names=quant_type.skip_modules,
+            )
+            logger.info(f"TorchAO FP8 converted {replaced} Linear layers in LTX transformer blocks")
+            self.quant_type = quant_type.quant_type
+            return
         # Keep a flag for downstream pipeline logic (e.g., FSDP buffer conversion).
         self.quant_type = quant_type
 
@@ -2200,3 +2238,5 @@ __all__ = [
     "PerturbationType",
     "X0Model",
 ]
+
+

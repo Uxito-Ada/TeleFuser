@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import functools
 import math
@@ -600,6 +600,54 @@ class QwenImageDiT(BaseModel):
 
     def enable_quant(self, quant_type: str | torch.dtype):
         """Enable quantization for transformer blocks."""
+        from telefuser.core.config import QuantConfig, QuantType
+
+        if isinstance(quant_type, QuantConfig):
+            if quant_type.quant_type == QuantType.NVFP4:
+                logger.info("loading weights with NVFP4, start convert linear layers to 4-bit")
+                from telefuser.ops.nvfp4_linear import replace_linear_layers_with_nvfp4
+
+                replaced = replace_linear_layers_with_nvfp4(
+                    self.transformer_blocks,
+                    group_size=quant_type.group_size,
+                    include_names=quant_type.quantize_modules,
+                    exclude_names=quant_type.skip_modules,
+                    keep_fp16_weight=quant_type.keep_fp16_weight,
+                )
+                logger.info(f"NVFP4 converted {replaced} Linear layers in QwenImage transformer blocks")
+                self.quant_type = quant_type.quant_type
+                return
+            if quant_type.quant_type == QuantType.TORCHAO_INT4:
+                logger.info("loading weights with TorchAO INT4, start quantize linear layers")
+                from telefuser.ops.torchao_int4_linear import replace_linear_layers_with_torchao_int4
+
+                target = self.transformer_blocks if hasattr(self, "transformer_blocks") else self.blocks
+                replaced = replace_linear_layers_with_torchao_int4(
+                    target,
+                    group_size=quant_type.group_size,
+                    include_names=quant_type.quantize_modules,
+                    exclude_names=quant_type.skip_modules,
+                )
+                self.torchao_int4_replaced_linear = replaced
+                logger.info(f"TorchAO INT4 converted {replaced} Linear layers")
+                self.quant_type = quant_type.quant_type
+                return
+            if quant_type.quant_type == QuantType.TORCHAO_FP8:
+                logger.info("loading weights with TorchAO FP8, start quantize linear layers")
+                from telefuser.ops.torchao_fp8_linear import replace_linear_layers_with_torchao_fp8
+
+                target = self.transformer_blocks if hasattr(self, "transformer_blocks") else self.blocks
+                replaced = replace_linear_layers_with_torchao_fp8(
+                    target,
+                    include_names=quant_type.quantize_modules,
+                    exclude_names=quant_type.skip_modules,
+                )
+                self.torchao_fp8_replaced_linear = replaced
+                logger.info(f"TorchAO FP8 converted {replaced} Linear layers")
+                self.quant_type = quant_type.quant_type
+                return
+            quant_type = torch.float8_e4m3fn if quant_type.quant_type == QuantType.FP8 else quant_type.quant_type
+
         if quant_type in [torch.float8_e4m3fn]:
             logger.info(f"loading weights with {quant_type}, start convert linear layer to {quant_type}")
             from telefuser.ops.quantized_linear import replace_linear_layers
@@ -778,3 +826,5 @@ from telefuser.core.model_registry import register_model_config
 
 register_model_config(None, "7a32c4aa3de140d48a5899ca505944b9", ["qwen_image_dit"], [QwenImageDiT], "official")
 register_model_config(None, "0319a1cb19835fb510907dd3367c95ff", ["qwen_image_dit"], [QwenImageDiT], "official")
+
+
