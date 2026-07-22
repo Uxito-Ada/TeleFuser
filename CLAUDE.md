@@ -138,6 +138,21 @@ TeleFuser's model follows a strict layered architecture for operations:
 - All public function parameters **must have type annotations** (return types optional)
 - Use Python 3.10+ syntax: `str | None`, `list[int]`
 
+## Pipeline Integration Contract
+
+When adding or porting a pipeline, preserve upstream behavior and reuse TeleFuser's existing interfaces. Treat the current repository, tests, and documentation as the API source of truth.
+
+- Before editing, select the closest maintained pipeline, public example, and tests as structural baselines. Read the relevant adding-new-example, adding-new-model, adding-new-stage, model-loading, configuration, and service documentation.
+- Inventory required model-specific classes and configuration fields and map them to upstream behavior and the selected baseline.
+- List every proposed framework-level or cross-pipeline interface, general-purpose configuration field, environment variable, loader, registry, CLI option, or service schema deviation. The expected list is empty.
+- Reuse `BasePipeline`, `BaseStage`, `ModuleManager`, existing configuration dataclasses, example contracts, and service schemas. Do not create parallel interfaces or attach ad-hoc configuration attributes for convenience.
+- If existing extension points cannot express a requirement, report the exact gap and obtain user approval before introducing a new public interface or configuration mechanism.
+- Do not add an environment variable during pipeline integration unless the user explicitly requests it or an existing documented variable already has the exact required semantics. Prefer function parameters for request-scoped inputs, dataclass fields for runtime configuration, CLI options for command-line inputs, and service schemas for API inputs.
+- If a new process-level environment variable is unavoidable, obtain approval first and add documentation, a default, validation, precedence rules, and tests for unset, valid, and invalid values.
+- Establish a faithful upstream path before stage splitting or optimization. Preserve computation order, tensor shapes, conditioning paths, scheduler semantics, defaults, and output format; read checkpoint metadata instead of guessing architecture values.
+- Do not combine initial integration with sparse attention, caching, quantization, refactoring, or other optimizations unless the user explicitly includes them.
+- Before completion, inspect the diff for new environment lookups, public definitions, dataclass fields, CLI options, and schema fields. Report all intentional additions and differences from both upstream and the selected TeleFuser baseline.
+
 ## Documentation Links
 
 | Topic | English | Chinese |
