@@ -362,35 +362,33 @@ class QuantKernelBackend(Enum):
 class QuantConfig:
     """Configuration for online quantization during model loading.
 
-    .. warning::
-        This is an interface definition only. The actual quantization
-        functionality is NOT yet implemented. This config serves as a
-        placeholder for future online quantization support.
-
-    Online quantization converts bf16/fp16 weights to lower precision (FP8/INT8/MXFP4/etc.)
-    at load time, reducing memory footprint without requiring pre-quantized checkpoint files.
+    Online TorchAO FP8 and bitsandbytes NF4 are implemented by selected model
+    classes (currently Wan, Qwen-Image, and LTX transformer blocks). Other
+    enum values may be used by model-specific paths or offline conversion and
+    are not automatically supported by the generic loader.
 
     Attributes:
         enabled: Whether to enable online quantization.
         quant_type: Target quantization type.
-        kernel_backend: Kernel backend for quantized operations.
-            AUTO selects the best available backend.
-        weight_block_size: Block size for block-wise quantization as (block_n, block_k).
-            None disables block-wise quantization (uses per-tensor/per-channel).
-            Common values: (128, 128) for FP8, (16, 16) for MX formats.
+        kernel_backend: Requested kernel backend. Current generic model paths
+            dispatch on quant_type; this field does not force backend routing.
+        weight_block_size: Reserved block size as (block_n, block_k).
+        group_size: Reserved group size for grouped quantization.
+        quantize_modules: Optional module-name substrings to include.
+        skip_modules: Module-name substrings to exclude.
+        keep_fp16_weight: Reserved policy flag for retaining source weights.
 
     Example:
-        Future usage (not yet functional)::
+        Online TorchAO FP8 usage::
 
             config = ModelRuntimeConfig(
                 torch_dtype=torch.bfloat16,
                 quant_config=QuantConfig(
                     enabled=True,
-                    quant_type=QuantType.FP8,
-                    weight_block_size=(128, 128),
+                    quant_type=QuantType.TORCHAO_FP8,
+                    kernel_backend=QuantKernelBackend.TORCHAO,
                 ),
             )
-            # Will load bf16 weights and quantize to fp8 at runtime
     """
 
     enabled: bool = False

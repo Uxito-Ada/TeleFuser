@@ -2,10 +2,13 @@
 
 这是一个功能强大的模型权重转换工具，支持格式转换、量化、LoRA融合等多种功能。
 
+量化格式的数学原理、运行时支持边界、硬件要求和逐项实践见
+[`docs/zh/quantization.md`](../../docs/zh/quantization.md)。
+
 ## 主要特性
 
 - **格式转换**: 支持 PyTorch (.pth) 和 SafeTensors (.safetensors) 格式互转
-- **模型量化**: 支持 INT8 和 FP8 量化，显著减小模型体积
+- **模型量化**: 支持 INT8、FP8、MXFP4、MXFP6、MXFP8 和 NVFP4 权重转换
 - **LoRA 融合**: 支持多种 LoRA 格式的加载和融合
 - **多模型支持**: 支持 Wan DiT、Qwen Image DiT、T5、CLIP 等
 - **灵活保存**: 支持单文件、按块、分块等多种保存方式
@@ -33,7 +36,7 @@
 
 - `--quantized`: 启用量化
 - `--bits`: 量化位宽，当前仅支持 8 位
-- `--linear_dtype`: 线性层量化类型
+- `--linear_type`: 线性层量化类型
   - `int8`: INT8 量化
   - `fp8`: FP8 量化
   - `nvfp4`: Nvidia fp4量化
@@ -104,7 +107,7 @@ python converter.py \
     --output /path/to/output \
     --output_ext .safetensors \
     --output_name wan_int8 \
-    --linear_dtype torch.int8 \
+    --linear_type int8 \
     --model_type wan_dit \
     --quantized \
     --save_by_block
@@ -117,7 +120,7 @@ python converter.py \
     --output /path/to/output \
     --output_ext .safetensors \
     --output_name wan2.1_i2v_480p_int8 \
-    --linear_dtype torch.int8 \
+    --linear_type int8 \
     --model_type wan_dit \
     --quantized \
     --single_file
@@ -132,7 +135,7 @@ python converter.py \
     --output /path/to/output \
     --output_ext .safetensors \
     --output_name wan_fp8 \
-    --linear_dtype fp8 \
+    --linear_type fp8 \
     --non_linear_dtype torch.bfloat16 \
     --model_type wan_dit \
     --quantized \
@@ -146,7 +149,7 @@ python converter.py \
     --output /path/to/output \
     --output_ext .safetensors \
     --output_name wan2.1_i2v_480p_scaled_fp8_e4m3 \
-    --linear_dtype fp8 \
+    --linear_type fp8 \
     --non_linear_dtype torch.bfloat16 \
     --model_type wan_dit \
     --quantized \
@@ -160,7 +163,7 @@ python converter.py \
     --output /path/to/output \
     --output_ext .safetensors \
     --output_name wan2.1_i2v_480p_scaled_fp8_e4m3_comfyui \
-    --linear_dtype fp8 \
+    --linear_type fp8 \
     --non_linear_dtype torch.bfloat16 \
     --model_type wan_dit \
     --quantized \
@@ -175,7 +178,7 @@ python converter.py \
     --output /path/to/output \
     --output_ext .safetensors \
     --output_name wan2.1_i2v_480p_scaled_fp8_e4m3_omfyui \
-    --linear_dtype fp8 \
+    --linear_type fp8 \
     --non_linear_dtype torch.bfloat16 \
     --model_type wan_dit \
     --quantized \
@@ -195,7 +198,7 @@ python converter.py \
     --output /path/to/output \
     --output_ext .pth \
     --output_name models_t5_umt5-xxl-enc-int8 \
-    --linear_dtype torch.int8 \
+    --linear_type int8 \
     --non_linear_dtype torch.bfloat16 \
     --model_type wan_t5 \
     --quantized
@@ -208,7 +211,7 @@ python converter.py \
     --output /path/to/output \
     --output_ext .pth \
     --output_name models_t5_umt5-xxl-enc-fp8 \
-    --linear_dtype fp8 \
+    --linear_type fp8 \
     --non_linear_dtype torch.bfloat16 \
     --model_type wan_t5 \
     --quantized
@@ -223,7 +226,7 @@ python converter.py \
     --output /path/to/output \
     --output_ext .pth \
     --output_name models_clip_open-clip-xlm-roberta-large-vit-huge-14-int8 \
-    --linear_dtype torch.int8 \
+    --linear_type int8 \
     --non_linear_dtype torch.float16 \
     --model_type wan_clip \
     --quantized
@@ -236,7 +239,7 @@ python converter.py \
     --output /path/to/output \
     --output_ext .pth \
     --output_name models_clip_open-clip-xlm-roberta-large-vit-huge-14-fp8 \
-    --linear_dtype fp8 \
+    --linear_type fp8 \
     --non_linear_dtype torch.float16 \
     --model_type wan_clip \
     --quantized
@@ -285,7 +288,7 @@ python converter.py \
     --lora_path /path/to/lora.safetensors \
     --lora_strength 1.0 \
     --quantized \
-    --linear_dtype fp8 \
+    --linear_type fp8 \
     --single_file
 ```
 
@@ -300,7 +303,7 @@ python converter.py \
     --lora_path /path/to/lora.safetensors \
     --lora_strength 1.0 \
     --quantized \
-    --linear_dtype fp8 \
+    --linear_type fp8 \
     --single_file \
     --comfyui_mode
 ```
@@ -316,7 +319,7 @@ python converter.py \
     --lora_path /path/to/lora.safetensors \
     --lora_strength 1.0 \
     --quantized \
-    --linear_dtype fp8 \
+    --linear_type fp8 \
     --single_file \
     --comfyui_mode \
     --full_quantized
