@@ -1,13 +1,7 @@
-"""TorchAO FP8 helpers for TeleFuser DiT linear layers.
-
-This backend applies TorchAO dynamic-activation FP8 + FP8 weight quantization
-to selected ``nn.Linear`` modules. It targets W8A8 inference on Hopper/H100
-and keeps the integration close to TorchAO's native ``quantize_`` API.
-"""
+"""TorchAO FP8 weight-only helpers for TeleFuser DiT linear layers."""
 
 from __future__ import annotations
 
-import inspect
 from importlib import metadata
 from typing import Iterable
 
@@ -28,18 +22,6 @@ def _import_first_attr(module_names: tuple[str, ...], attr_names: tuple[str, ...
             if hasattr(module, attr_name):
                 return getattr(module, attr_name)
     raise ImportError("; ".join(errors) if errors else f"none of {attr_names} found")
-
-
-def _instantiate_config(config_cls, **kwargs):
-    try:
-        signature = inspect.signature(config_cls)
-        accepted = {k: v for k, v in kwargs.items() if k in signature.parameters}
-    except (TypeError, ValueError):
-        accepted = kwargs
-    try:
-        return config_cls(**accepted)
-    except TypeError:
-        return config_cls()
 
 
 def _check_torchao_fp8_available() -> None:
@@ -97,14 +79,13 @@ def replace_linear_layers_with_torchao_fp8(
         raise RuntimeError("TorchAO FP8 requires torchao.quantization.quantize_") from exc
 
     fp8_api = _import_first_attr(
-        ("torchao.quantization", "torchao.quantization.quant_api", "torchao.float8"),
+        ("torchao.quantization", "torchao.quantization.quant_api"),
         (
-            "float8_dynamic_activation_float8_weight",
-            "Float8DynamicActivationFloat8WeightConfig",
             "Float8WeightOnlyConfig",
+            "float8_weight_only",
         ),
     )
-    quant_config = fp8_api() if not inspect.isclass(fp8_api) else _instantiate_config(fp8_api)
+    quant_config = fp8_api()
     selected = _count_matching_linear_layers(module, include_names=include_names, exclude_names=exclude_names)
 
     def filter_fn(target: nn.Module, *args) -> bool:
