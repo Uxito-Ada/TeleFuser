@@ -6,14 +6,13 @@ import os
 from pathlib import Path
 from typing import Any
 
-from examples.minimax_h3.common import (
+from telefuser.core.config import AttnImplType
+from telefuser.pipelines.minimax_h3.example_utils import (
     MINIMAX_H3_DEFAULT_FL2VA_IMAGE,
     load_minimax_h3_pipeline,
     save_generation,
 )
-from telefuser.core.config import AttnImplType, FeatureCacheConfig
 from telefuser.pipelines.minimax_h3.pipeline import MiniMaxH3Generation, MiniMaxH3Pipeline
-from telefuser.pipelines.minimax_h3.task_profiles import MINIMAX_H3_FINITE_ASPECT_RATIOS
 from telefuser.service.core.contract_templates import build_pipeline_manifest, build_task_contract_template
 
 TF_MODEL_ZOO_PATH = os.environ.get("TF_MODEL_ZOO_PATH", "/hhb-data/aigc/model_zoo")
@@ -33,11 +32,8 @@ PPL_CONFIG: dict[str, Any] = {
     "audio_flow_shift": None,
     "device": "cuda:0",
     "enable_fsdp": None,
-    "online_adaln_cache": True,
     "attn_impl": AttnImplType.FLASH_ATTN_4,
-    "feature_cache_model_type": "MiniMax-H3-Base",
-    "feature_cache_n_derivatives": 1,
-    "feature_cache_taylor_threshold": 2,
+    "quantization": None,
 }
 
 
@@ -57,7 +53,7 @@ def _task_contract(task: str) -> dict[str, Any]:
             },
             "aspect_ratio": {
                 "default": PPL_CONFIG["aspect_ratio"],
-                "enum": list(MINIMAX_H3_FINITE_ASPECT_RATIOS),
+                "enum": ["16:9", "4:3", "1:1", "3:4", "9:16"],
             },
             "target_video_length": {
                 "default": PPL_CONFIG["target_video_length"],
@@ -82,12 +78,8 @@ def get_pipeline(
     device: str = PPL_CONFIG["device"],
     num_inference_steps: int = PPL_CONFIG["num_inference_steps"],
     enable_fsdp: bool | None = PPL_CONFIG["enable_fsdp"],
-    online_adaln_cache: bool = PPL_CONFIG["online_adaln_cache"],
     attn_impl: AttnImplType | str = PPL_CONFIG["attn_impl"],
-    enable_feature_cache: bool = False,
-    feature_cache_model_type: str = PPL_CONFIG["feature_cache_model_type"],
-    feature_cache_n_derivatives: int = PPL_CONFIG["feature_cache_n_derivatives"],
-    feature_cache_taylor_threshold: int = PPL_CONFIG["feature_cache_taylor_threshold"],
+    quantization: str | None = PPL_CONFIG["quantization"],
 ) -> MiniMaxH3Pipeline:
     """Load the FL2VA checkpoint partition for one, two, or four GPUs."""
     tp_degree = 2 if parallelism == 4 else 1
@@ -100,14 +92,8 @@ def get_pipeline(
         tp_degree=tp_degree,
         text_encoder_tp_degree=parallelism,
         enable_fsdp=enable_fsdp,
-        online_adaln_cache=online_adaln_cache,
         attn_impl=attn_impl,
-        feature_cache_config=FeatureCacheConfig(
-            enabled=enable_feature_cache,
-            model_type=feature_cache_model_type,
-            n_derivatives=feature_cache_n_derivatives,
-            taylor_threshold=feature_cache_taylor_threshold,
-        ),
+        quantization=quantization,
     )
 
 
@@ -241,7 +227,7 @@ def run_with_file(
     return {"output_path": str(Path(output_path))}
 
 
-def main() -> None:
+def _main(default_quantization: str | None = PPL_CONFIG["quantization"]) -> None:
     parser = argparse.ArgumentParser(description="Generate MiniMax H3 T2VA/FL2VA audio-video on H100 GPUs")
     parser.add_argument("--model-root", default=PPL_CONFIG["model_root"])
     parser.add_argument("--mode", choices=("t2va", "first-frame", "last-frame", "first-last"))
@@ -265,20 +251,13 @@ def main() -> None:
     parser.add_argument("--flow-shift", type=float, default=PPL_CONFIG["flow_shift"])
     parser.add_argument("--audio-flow-shift", type=float, default=PPL_CONFIG["audio_flow_shift"])
     parser.add_argument("--device", default=PPL_CONFIG["device"])
+    parser.add_argument(
+        "--quantization",
+        choices=("torchao-fp8", "bnb-nf4"),
+        default=default_quantization,
+        help="Online DiT Linear quantization backend (single GPU only).",
+    )
     parser.add_argument("--gpu-num", "--ulysses-degree", dest="gpu_num", type=int, choices=(1, 2, 4), default=1)
-    parser.add_argument("--enable-feature-cache", action="store_true")
-    parser.add_argument("--feature-cache-model-type", default=PPL_CONFIG["feature_cache_model_type"])
-    parser.add_argument(
-        "--feature-cache-n-derivatives",
-        type=int,
-        choices=(0, 1, 2),
-        default=PPL_CONFIG["feature_cache_n_derivatives"],
-    )
-    parser.add_argument(
-        "--feature-cache-taylor-threshold",
-        type=int,
-        default=PPL_CONFIG["feature_cache_taylor_threshold"],
-    )
     fsdp_group = parser.add_mutually_exclusive_group()
     fsdp_group.add_argument("--enable-fsdp", dest="enable_fsdp", action="store_true")
     fsdp_group.add_argument("--disable-fsdp", dest="enable_fsdp", action="store_false")
@@ -309,10 +288,7 @@ def main() -> None:
         device=args.device,
         num_inference_steps=args.steps,
         enable_fsdp=args.enable_fsdp,
-        enable_feature_cache=args.enable_feature_cache,
-        feature_cache_model_type=args.feature_cache_model_type,
-        feature_cache_n_derivatives=args.feature_cache_n_derivatives,
-        feature_cache_taylor_threshold=args.feature_cache_taylor_threshold,
+        quantization=args.quantization,
     )
     try:
         result = run_with_file(
@@ -331,6 +307,10 @@ def main() -> None:
         print("Output saved to {}".format(result["output_path"]))
     finally:
         pipeline.stop()
+
+
+def main() -> None:
+    _main()
 
 
 if __name__ == "__main__":

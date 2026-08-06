@@ -3,20 +3,19 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 import math
 import re
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable
+from typing import Any
 
 import torch
 import torch.distributed as dist
 import torch.nn as nn
 
 from telefuser.core.base_model import BaseModel
-from telefuser.core.config import AttentionConfig
+from telefuser.core.config import AttentionConfig, QuantConfig, QuantType
 from telefuser.distributed.collectives import all_gather_cat, all_reduce_sum_
 from telefuser.distributed.device_mesh import (
     get_tp_group,
@@ -27,10 +26,10 @@ from telefuser.distributed.device_mesh import (
 )
 from telefuser.distributed.parallel_shard import sequence_parallel_shard, sequence_parallel_unshard
 from telefuser.distributed.ulysses_comm import ulysses_gather_heads_destination_major, ulysses_scatter_qkv
-from telefuser.feature_cache import AdaTaylorCacheCalibrator
 from telefuser.ops import RMSNorm, apply_qk_norm_rope_neox, indexed_gate, indexed_scale_shift, silu_and_mul_reuse_input
 from telefuser.ops.attention import attention
 from telefuser.ops.rotary import apply_rotary_emb_neox
+from telefuser.utils.logging import logger
 
 MINIMAX_H3_ADALN_MODALITY_NUM = 3
 MINIMAX_H3_FP32_PARAM_NAMES = frozenset(
@@ -106,187 +105,6 @@ class MiniMaxH3DiTConfig:
     @property
     def final_adaln_out_features(self) -> int:
         return 2 * self.hidden_size
-
-
-MINIMAX_H3_ADALN_CACHE_FORMAT_VERSION = 1
-MINIMAX_H3_ADALN_CACHE_GENERATOR_VERSION = "telefuser-minimax-h3-adaln-v1"
-
-
-def _adaln_config_payload(config: MiniMaxH3DiTConfig) -> dict[str, Any]:
-    return json.loads(json.dumps(asdict(config), sort_keys=True))
-
-
-@dataclass
-class MiniMaxH3AdaLNCache:
-    """Precomputed AdaLN projection outputs for a fixed H3 denoising schedule."""
-
-    timesteps: torch.Tensor
-    block_outputs: tuple[torch.Tensor, ...]
-    final_output: torch.Tensor
-    config: MiniMaxH3DiTConfig
-    model_fingerprint: str
-    partition: str | None = None
-    _device_outputs: dict[str, tuple[tuple[torch.Tensor, ...], torch.Tensor]] = field(
-        default_factory=dict, init=False, repr=False
-    )
-
-    def __post_init__(self) -> None:
-        self.timesteps = self.timesteps.detach().to(device="cpu", dtype=torch.float32).contiguous()
-        self.block_outputs = tuple(
-            output.detach().to(device="cpu", dtype=torch.bfloat16).contiguous() for output in self.block_outputs
-        )
-        self.final_output = self.final_output.detach().to(device="cpu", dtype=torch.bfloat16).contiguous()
-        if self.timesteps.ndim != 1 or self.timesteps.numel() == 0:
-            raise ValueError("AdaLN cache timesteps must be a non-empty rank-1 tensor.")
-        if len(self.block_outputs) != self.config.num_layers:
-            raise ValueError(f"AdaLN cache has {len(self.block_outputs)} blocks, expected {self.config.num_layers}.")
-        expected_rows = self.timesteps.numel()
-        expected_block_width = self.config.adaln_out_features
-        for index, output in enumerate(self.block_outputs):
-            if output.shape != (expected_rows, expected_block_width):
-                raise ValueError(
-                    f"AdaLN cache block {index} has shape {tuple(output.shape)}, "
-                    f"expected {(expected_rows, expected_block_width)}."
-                )
-        expected_final_shape = (expected_rows, self.config.final_adaln_out_features)
-        if self.final_output.shape != expected_final_shape:
-            raise ValueError(
-                f"AdaLN cache final output has shape {tuple(self.final_output.shape)}, expected {expected_final_shape}."
-            )
-
-    @classmethod
-    def from_model(
-        cls, model: Any, timesteps: Iterable[float] | torch.Tensor, *, partition: str | None = None
-    ) -> MiniMaxH3AdaLNCache:
-        if model.tp_flag:
-            raise RuntimeError("Build the AdaLN cache before tensor-parallel sharding.")
-        if model.time_embedder is None:
-            raise RuntimeError("The model is already in inference-only AdaLN mode.")
-        unique_timesteps = torch.unique(torch.as_tensor(timesteps, dtype=torch.float32), sorted=True)
-        if unique_timesteps.numel() == 0:
-            raise ValueError("At least one timestep is required to build an AdaLN cache.")
-        model_device = next(model.parameters()).device
-        with torch.inference_mode():
-            adaln_input = torch.nn.functional.silu(model.time_embedder(unique_timesteps.to(model_device))).to(
-                torch.bfloat16
-            )
-            block_outputs = tuple(
-                block.adaln_proj.project_local(adaln_input).detach().cpu().contiguous() for block in model.blocks
-            )
-            final_output = model.final_layer.adaln_proj.project_local(adaln_input).detach().cpu().contiguous()
-        return cls(
-            timesteps=unique_timesteps,
-            block_outputs=block_outputs,
-            final_output=final_output,
-            config=model.config,
-            model_fingerprint=model.adaln_fingerprint(),
-            partition=partition,
-        )
-
-    def _indices_for(self, timesteps: torch.Tensor) -> torch.Tensor:
-        positions = {float(value).hex(): index for index, value in enumerate(self.timesteps.tolist())}
-        indices: list[int] = []
-        for timestep in timesteps.detach().to(device="cpu", dtype=torch.float32).tolist():
-            index = positions.get(float(timestep).hex())
-            if index is None:
-                raise ValueError(
-                    f"AdaLN cache is missing timestep {timestep:.8g}; rebuild it for the requested denoising schedule."
-                )
-            indices.append(index)
-        return torch.tensor(indices, dtype=torch.long)
-
-    def _outputs_for_device(self, device: torch.device) -> tuple[tuple[torch.Tensor, ...], torch.Tensor]:
-        if device.type == "cpu":
-            return self.block_outputs, self.final_output
-        key = str(device)
-        outputs = self._device_outputs.get(key)
-        if outputs is None:
-            outputs = (
-                tuple(output.to(device=device, non_blocking=True) for output in self.block_outputs),
-                self.final_output.to(device=device, non_blocking=True),
-            )
-            self._device_outputs[key] = outputs
-        return outputs
-
-    def resolve(
-        self, model: Any, timesteps: torch.Tensor, device: torch.device
-    ) -> tuple[tuple[tuple[torch.Tensor, ...], ...], tuple[torch.Tensor, torch.Tensor]]:
-        indices = self._indices_for(timesteps).to(device)
-        block_outputs, final_output = self._outputs_for_device(device)
-        block_params = tuple(
-            block.adaln_proj.split_output(output.index_select(0, indices))
-            for block, output in zip(model.blocks, block_outputs, strict=True)
-        )
-        final_params = model.final_layer.adaln_proj.split_output(final_output.index_select(0, indices))
-        return block_params, final_params
-
-    def clear_device_cache(self) -> None:
-        self._device_outputs.clear()
-
-    def validate_model(self, model: Any) -> None:
-        if _adaln_config_payload(self.config) != _adaln_config_payload(model.config):
-            raise ValueError("AdaLN cache configuration does not match the loaded MiniMax H3 model.")
-        if self.model_fingerprint != model.adaln_fingerprint():
-            raise ValueError("AdaLN cache fingerprint does not match the loaded MiniMax H3 AdaLN weights.")
-
-    def save(self, directory: str | Path) -> None:
-        from safetensors.torch import save_file
-
-        root = Path(directory)
-        root.mkdir(parents=True, exist_ok=True)
-        tensors: dict[str, torch.Tensor] = {"timesteps": self.timesteps, "final_output": self.final_output}
-        tensors.update({f"block_{index}": output for index, output in enumerate(self.block_outputs)})
-        save_file(
-            tensors,
-            str(root / "adaln.safetensors"),
-            metadata={"format_version": str(MINIMAX_H3_ADALN_CACHE_FORMAT_VERSION)},
-        )
-        manifest = {
-            "format_version": MINIMAX_H3_ADALN_CACHE_FORMAT_VERSION,
-            "config": _adaln_config_payload(self.config),
-            "model_fingerprint": self.model_fingerprint,
-            "partition": self.partition,
-            "dtype": str(self.final_output.dtype),
-            "generator_version": MINIMAX_H3_ADALN_CACHE_GENERATOR_VERSION,
-            "tensor_file": "adaln.safetensors",
-        }
-        (root / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
-
-    @classmethod
-    def load(cls, directory: str | Path, model: Any, *, expected_partition: str | None = None) -> MiniMaxH3AdaLNCache:
-        from safetensors.torch import load_file
-
-        root = Path(directory)
-        manifest_path = root / "manifest.json"
-        if not manifest_path.is_file():
-            raise FileNotFoundError(f"MiniMax H3 AdaLN cache manifest is missing: {manifest_path}")
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        if manifest.get("format_version") != MINIMAX_H3_ADALN_CACHE_FORMAT_VERSION:
-            raise ValueError("Unsupported MiniMax H3 AdaLN cache format version.")
-        if manifest.get("config") != _adaln_config_payload(model.config):
-            raise ValueError("AdaLN cache configuration does not match the loaded MiniMax H3 model.")
-        if manifest.get("generator_version") != MINIMAX_H3_ADALN_CACHE_GENERATOR_VERSION:
-            raise ValueError("Unsupported MiniMax H3 AdaLN cache generator version.")
-        if manifest.get("dtype") != str(torch.bfloat16):
-            raise ValueError("AdaLN cache dtype is incompatible with MiniMax H3 BF16 inference.")
-        if expected_partition is not None and manifest.get("partition") != expected_partition:
-            raise ValueError("AdaLN cache partition does not match the loaded MiniMax H3 checkpoint.")
-        if manifest.get("model_fingerprint") != model.adaln_fingerprint():
-            raise ValueError("AdaLN cache fingerprint does not match the loaded MiniMax H3 AdaLN weights.")
-        tensor_file = root / manifest.get("tensor_file", "adaln.safetensors")
-        tensors = load_file(str(tensor_file), device="cpu")
-        try:
-            block_outputs = tuple(tensors[f"block_{index}"] for index in range(model.config.num_layers))
-            return cls(
-                timesteps=tensors["timesteps"],
-                block_outputs=block_outputs,
-                final_output=tensors["final_output"],
-                config=model.config,
-                model_fingerprint=manifest["model_fingerprint"],
-                partition=manifest.get("partition"),
-            )
-        except KeyError as error:
-            raise ValueError(f"MiniMax H3 AdaLN cache is missing tensor {error.args[0]}.") from error
 
 
 def _rms_norm(size: int, eps: float) -> RMSNorm:
@@ -521,7 +339,7 @@ class MiniMaxH3AdaLNProjection(nn.Module):
         self.expand_ratio = expand_ratio
         self.modality_count = modality_count
         self.hidden_size = config.hidden_size
-        self.linear: nn.Linear | None = nn.Linear(
+        self.linear = nn.Linear(
             config.time_embed_dim,
             expand_ratio * modality_count * config.hidden_size,
             dtype=torch.bfloat16,
@@ -530,19 +348,12 @@ class MiniMaxH3AdaLNProjection(nn.Module):
         self.tp_world_size = 1
 
     def enable_tp(self, group: dist.ProcessGroup, *, rank: int, world_size: int) -> None:
-        if self.linear is None:
-            raise RuntimeError("MiniMax H3 AdaLN projection weights were released for inference-only execution.")
         _shard_linear_output(self.linear, rank=rank, world_size=world_size)
         self.tp_group = group
         self.tp_world_size = world_size
 
     def project_local(self, embedding: torch.Tensor) -> torch.Tensor:
-        if self.linear is None:
-            raise RuntimeError("MiniMax H3 AdaLN projection weights were released for inference-only execution.")
         return self.linear(embedding)
-
-    def release_weights(self) -> None:
-        self.linear = None
 
     def split_output(self, output: torch.Tensor) -> tuple[torch.Tensor, ...]:
         output = output.reshape(-1, self.expand_ratio * self.hidden_size)
@@ -633,7 +444,7 @@ class MiniMaxH3DiTBlock(nn.Module):
         self,
         hidden: torch.Tensor,
         *,
-        adaln_input: torch.Tensor | None,
+        adaln_input: torch.Tensor,
         combined_indices: torch.Tensor,
         sequence_lengths: list[int],
         rope_cos_sin_cache: torch.Tensor,
@@ -672,15 +483,10 @@ class MiniMaxH3FinalLayer(nn.Module):
         self,
         hidden: torch.Tensor,
         *,
-        adaln_input: torch.Tensor | None,
+        adaln_input: torch.Tensor,
         inverse_indices: torch.Tensor,
-        adaln_params: tuple[torch.Tensor, torch.Tensor] | None = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if adaln_params is None:
-            if adaln_input is None:
-                raise ValueError("adaln_input is required when no cached AdaLN parameters are supplied.")
-            adaln_params = self.adaln_proj(adaln_input)
-        shift, scale = adaln_params
+        shift, scale = self.adaln_proj(adaln_input)
         hidden = _modulate(self.norm(hidden), shift, scale, inverse_indices).float()
         return self.video_out(hidden), self.audio_out(hidden)
 
@@ -709,143 +515,21 @@ class MiniMaxH3DiT(BaseModel):
         self._static_rope_cos_sin: torch.Tensor | None = None
         self._static_sequence_lengths: list[int] | None = None
         self._static_cu_seqlens: torch.Tensor | None = None
-        self._adaln_cache: MiniMaxH3AdaLNCache | None = None
-        self._online_adaln_cache_enabled = False
-        self._online_adaln_partition: str | None = None
-        self._online_adaln_rows: dict[str, tuple[float, tuple[torch.Tensor, ...], torch.Tensor]] = {}
-
-    def adaln_fingerprint(self) -> str:
-        if self.time_embedder is None:
-            raise RuntimeError("AdaLN weights were released; their fingerprint is unavailable.")
-        tensors: list[tuple[str, torch.Tensor]] = list(self.time_embedder.named_parameters(prefix="time_embedder"))
-        for index, block in enumerate(self.blocks):
-            if block.adaln_proj.linear is None:
-                raise RuntimeError("AdaLN weights were released; their fingerprint is unavailable.")
-            tensors.extend(block.adaln_proj.linear.named_parameters(prefix=f"blocks.{index}.adaln_proj.linear"))
-        if self.final_layer.adaln_proj.linear is None:
-            raise RuntimeError("AdaLN weights were released; their fingerprint is unavailable.")
-        tensors.extend(self.final_layer.adaln_proj.linear.named_parameters(prefix="final_layer.adaln_proj.linear"))
-        digest = hashlib.sha256()
-        for name, tensor in tensors:
-            value = tensor.detach().to(device="cpu").contiguous()
-            digest.update(name.encode("utf-8"))
-            digest.update(str(tuple(value.shape)).encode("ascii"))
-            digest.update(str(value.dtype).encode("ascii"))
-            digest.update(value.view(torch.uint8).numpy().tobytes())
-        return digest.hexdigest()
-
-    def enable_online_adaln_cache(self, *, partition: str | None = None) -> None:
-        if self._adaln_cache is not None:
-            raise RuntimeError("MiniMax H3 inference-only AdaLN cache is already enabled.")
-        if self._online_adaln_cache_enabled:
-            raise RuntimeError("MiniMax H3 online AdaLN cache is already enabled.")
-        self._online_adaln_cache_enabled = True
-        self._online_adaln_partition = partition
-        self._online_adaln_rows.clear()
-
-    def _record_online_adaln(
-        self, timesteps: torch.Tensor, adaln_input: torch.Tensor
-    ) -> tuple[tuple[tuple[torch.Tensor, ...], ...], tuple[torch.Tensor, torch.Tensor]]:
-        raw_block_outputs = tuple(block.adaln_proj.project_local(adaln_input) for block in self.blocks)
-        raw_final_output = self.final_layer.adaln_proj.project_local(adaln_input)
-        if self.tp_flag:
-            first_projection = self.blocks[0].adaln_proj
-            gathered_block_outputs = all_gather_cat(
-                torch.stack(raw_block_outputs),
-                dim=-1,
-                group=first_projection.tp_group,
-                world_size=first_projection.tp_world_size,
-            )
-            raw_block_outputs = tuple(gathered_block_outputs.unbind(dim=0))
-            final_projection = self.final_layer.adaln_proj
-            raw_final_output = all_gather_cat(
-                raw_final_output,
-                dim=-1,
-                group=final_projection.tp_group,
-                world_size=final_projection.tp_world_size,
-            )
-        timestep_values = timesteps.detach().to(device="cpu", dtype=torch.float32).tolist()
-        for row, timestep in enumerate(timestep_values):
-            key = float(timestep).hex()
-            self._online_adaln_rows[key] = (
-                float(timestep),
-                tuple(
-                    output[row].detach().to(device="cpu", dtype=torch.bfloat16).contiguous()
-                    for output in raw_block_outputs
-                ),
-                raw_final_output[row].detach().to(device="cpu", dtype=torch.bfloat16).contiguous(),
-            )
-        block_params = tuple(
-            block.adaln_proj.split_output(output) for block, output in zip(self.blocks, raw_block_outputs, strict=True)
-        )
-        final_params = self.final_layer.adaln_proj.split_output(raw_final_output)
-        return block_params, final_params
-
-    def finalize_online_adaln_cache(self) -> bool:
-        if not self._online_adaln_cache_enabled:
-            return self._adaln_cache is not None
-        if not self._online_adaln_rows:
-            raise RuntimeError("Cannot finalize an online AdaLN cache before any request timestep was observed.")
-        rows = [
-            self._online_adaln_rows[key]
-            for key in sorted(self._online_adaln_rows, key=lambda item: self._online_adaln_rows[item][0])
-        ]
-        cache = MiniMaxH3AdaLNCache(
-            timesteps=torch.tensor([row[0] for row in rows], dtype=torch.float32),
-            block_outputs=tuple(
-                torch.stack([row[1][block_index] for row in rows]) for block_index in range(self.config.num_layers)
-            ),
-            final_output=torch.stack([row[2] for row in rows]),
-            config=self.config,
-            model_fingerprint=self.adaln_fingerprint(),
-            partition=self._online_adaln_partition,
-        )
-        self.enable_inference_only_adaln(cache)
-        self._online_adaln_cache_enabled = False
-        self._online_adaln_partition = None
-        self._online_adaln_rows.clear()
-        return True
-
-    def prepare_adaln_cache(
-        self, timesteps: Iterable[float] | torch.Tensor, *, partition: str | None = None
-    ) -> MiniMaxH3AdaLNCache:
-        return MiniMaxH3AdaLNCache.from_model(self, timesteps, partition=partition)
-
-    def enable_inference_only_adaln(self, cache: MiniMaxH3AdaLNCache) -> None:
-        if self._adaln_cache is not None:
-            raise RuntimeError("MiniMax H3 inference-only AdaLN mode is already enabled.")
-        cache.validate_model(self)
-        self._adaln_cache = cache
-        for block in self.blocks:
-            block.adaln_proj.release_weights()
-        self.final_layer.adaln_proj.release_weights()
-        self.time_embedder = None
-
-    def load_inference_only_adaln(self, directory: str | Path, *, expected_partition: str | None = None) -> None:
-        self.enable_inference_only_adaln(
-            MiniMaxH3AdaLNCache.load(directory, self, expected_partition=expected_partition)
-        )
 
     def _preserve_fp32_boundaries(self) -> None:
         for name in MINIMAX_H3_FP32_PARAM_NAMES:
-            try:
-                parameter = self.get_parameter(name)
-            except AttributeError:
-                continue
+            parameter = self.get_parameter(name)
             if parameter.dtype != torch.float32:
                 parameter.data = parameter.data.float()
         if self.rope.inv_freq.dtype != torch.float32:
             self.rope.inv_freq.data = self.rope.inv_freq.data.float()
 
     def to(self, *args: Any, **kwargs: Any) -> MiniMaxH3DiT:
-        preserved_parameters: dict[str, torch.Tensor] = {}
-        for name in MINIMAX_H3_FP32_PARAM_NAMES:
-            try:
-                parameter = self.get_parameter(name)
-            except AttributeError:
-                continue
-            if not parameter.is_meta:
-                preserved_parameters[name] = parameter.detach().clone()
+        preserved_parameters = {
+            name: parameter.detach().clone()
+            for name in MINIMAX_H3_FP32_PARAM_NAMES
+            if not (parameter := self.get_parameter(name)).is_meta
+        }
         preserved_buffers = {
             name: buffer.detach().clone()
             for name in MINIMAX_H3_FP32_BUFFER_NAMES
@@ -1007,17 +691,7 @@ class MiniMaxH3DiT(BaseModel):
             hidden.index_copy_(0, audio_positions, self.audio_patch_proj(audio_rows).to(torch.bfloat16))
 
         timesteps = kwargs["unique_timesteps"].reshape(-1).to(device)
-        adaln_input: torch.Tensor | None = None
-        block_adaln_params: tuple[tuple[torch.Tensor, ...], ...] | None = None
-        final_adaln_params: tuple[torch.Tensor, torch.Tensor] | None = None
-        if self._adaln_cache is None:
-            if self.time_embedder is None:
-                raise RuntimeError("MiniMax H3 AdaLN weights were released without an inference cache.")
-            adaln_input = nn.functional.silu(self.time_embedder(timesteps)).to(torch.bfloat16)
-            if self._online_adaln_cache_enabled:
-                block_adaln_params, final_adaln_params = self._record_online_adaln(timesteps, adaln_input)
-        else:
-            block_adaln_params, final_adaln_params = self._adaln_cache.resolve(self, timesteps, device)
+        adaln_input = nn.functional.silu(self.time_embedder(timesteps)).to(torch.bfloat16)
         inverse_indices = kwargs["inverse_indices"].reshape(-1).long().to(device)
         if inverse_indices.numel() != sequence:
             raise ValueError("inverse_indices must cover the full packed sequence")
@@ -1058,55 +732,33 @@ class MiniMaxH3DiT(BaseModel):
                 )
         else:
             inverse_indices = local_inverse_indices
-        feature_cache = self.feature_cache
-        if feature_cache.should_compute(True):
-            # H3's gated residual ops may reuse their input storage. Preserve the
-            # pre-block value so cache residuals always span the complete block stack.
-            input_hidden = hidden.clone()
-            if self.tp_flag and block_adaln_params is None:
-                local_adaln = torch.stack([block.adaln_proj.project_local(adaln_input) for block in self.blocks])
-                first_projection = self.blocks[0].adaln_proj
-                gathered_adaln = all_gather_cat(
-                    local_adaln,
-                    dim=-1,
-                    group=first_projection.tp_group,
-                    world_size=first_projection.tp_world_size,
-                )
-                block_adaln_params = tuple(
-                    block.adaln_proj.split_output(output) for block, output in zip(self.blocks, gathered_adaln)
-                )
-            for index, block in enumerate(self.blocks):
-                hidden = block(
-                    hidden,
-                    adaln_input=adaln_input,
-                    combined_indices=combined_indices,
-                    sequence_lengths=sequence_lengths,
-                    rope_cos_sin_cache=rope_cos_sin_cache,
-                    attention_config=self.attention_config,
-                    cu_seqlens=cu_seqlens,
-                    adaln_params=None if block_adaln_params is None else block_adaln_params[index],
-                )
-            if isinstance(feature_cache, AdaTaylorCacheCalibrator):
-                # Video rows greatly outnumber audio rows in H3. Calibrate decisions on
-                # audio residuals so the joint hidden cache does not neglect its weaker modality.
-                local_audio_positions = (
-                    audio_positions[(audio_positions >= row_start) & (audio_positions < row_stop)] - row_start
-                )
-                calibration_output = hidden.index_select(0, local_audio_positions)
-                calibration_input = input_hidden.index_select(0, local_audio_positions)
-                feature_cache.update(calibration_output, calibration_input, True)
-                # H3 has one joint branch. Mirror it into the legacy CFG slot so the
-                # shared parameter format loads unchanged.
-                feature_cache.should_compute(False)
-                feature_cache.update(calibration_output, calibration_input, False)
-            else:
-                feature_cache.update(hidden, input_hidden, True)
-        else:
-            hidden = feature_cache.approximate(hidden, True)
+        block_adaln_params = None
+        if self.tp_flag:
+            local_adaln = torch.stack([block.adaln_proj.project_local(adaln_input) for block in self.blocks])
+            first_projection = self.blocks[0].adaln_proj
+            gathered_adaln = all_gather_cat(
+                local_adaln,
+                dim=-1,
+                group=first_projection.tp_group,
+                world_size=first_projection.tp_world_size,
+            )
+            block_adaln_params = tuple(
+                block.adaln_proj.split_output(output) for block, output in zip(self.blocks, gathered_adaln)
+            )
+        for index, block in enumerate(self.blocks):
+            hidden = block(
+                hidden,
+                adaln_input=adaln_input,
+                combined_indices=combined_indices,
+                sequence_lengths=sequence_lengths,
+                rope_cos_sin_cache=rope_cos_sin_cache,
+                attention_config=self.attention_config,
+                cu_seqlens=cu_seqlens,
+                adaln_params=None if block_adaln_params is None else block_adaln_params[index],
+            )
         video_logits, audio_logits = self.final_layer(
             hidden,
             adaln_input=adaln_input,
-            adaln_params=final_adaln_params,
             inverse_indices=inverse_indices,
         )
         if self.usp_flag:
@@ -1138,6 +790,42 @@ class MiniMaxH3DiT(BaseModel):
         for block in self.blocks:
             block.attn.set_ulysses_group(group)
 
+    def enable_quant(self, quant_type: QuantConfig | str | torch.dtype) -> None:
+        """Apply supported online quantization to transformer Linear layers."""
+        if not isinstance(quant_type, QuantConfig):
+            super().enable_quant(quant_type)
+            return
+        if not quant_type.enabled:
+            return
+
+        include_names = quant_type.quantize_modules or ("blocks.",)
+        if quant_type.quant_type == QuantType.TORCHAO_FP8:
+            from telefuser.ops.torchao_fp8_linear import replace_linear_layers_with_torchao_fp8
+
+            replaced = replace_linear_layers_with_torchao_fp8(
+                self,
+                include_names=include_names,
+                exclude_names=quant_type.skip_modules,
+            )
+            self.torchao_fp8_replaced_linear = replaced
+        elif quant_type.quant_type == QuantType.BNB_NF4:
+            from telefuser.ops.bnb_nf4_linear import replace_linear_layers_with_bnb_nf4
+
+            replaced = replace_linear_layers_with_bnb_nf4(
+                self,
+                compute_dtype=torch.bfloat16,
+                include_names=include_names,
+                exclude_names=quant_type.skip_modules,
+            )
+            self.bnb_nf4_replaced_linear = replaced
+        else:
+            raise ValueError(f"MiniMax H3 does not support online quantization type {quant_type.quant_type.name}")
+
+        if replaced == 0:
+            raise RuntimeError("MiniMax H3 online quantization did not select any Linear layers")
+        self.quant_type = quant_type.quant_type
+        logger.info(f"MiniMax H3 {quant_type.quant_type.name} converted {replaced} transformer Linear layers")
+
     def enable_tp(self, device_mesh: Any | None = None) -> None:
         self.device_mesh = device_mesh if device_mesh is not None else self.device_mesh
         world_size = get_tp_world_size(self.device_mesh)
@@ -1163,10 +851,8 @@ class MiniMaxH3DiT(BaseModel):
         for block in self.blocks:
             block.attn.enable_tp(group, rank=rank, world_size=world_size)
             block.mlp.enable_tp(group, rank=rank, world_size=world_size)
-            if self._adaln_cache is None:
-                block.adaln_proj.enable_tp(group, rank=rank, world_size=world_size)
-        if self._adaln_cache is None:
-            self.final_layer.adaln_proj.enable_tp(group, rank=rank, world_size=world_size)
+            block.adaln_proj.enable_tp(group, rank=rank, world_size=world_size)
+        self.final_layer.adaln_proj.enable_tp(group, rank=rank, world_size=world_size)
         self.tp_flag = True
 
     def reset_communication_metrics(self) -> None:
@@ -1273,9 +959,6 @@ class MiniMaxH3DiTStateDictConverter:
 
 
 __all__ = [
-    "MINIMAX_H3_ADALN_CACHE_FORMAT_VERSION",
-    "MINIMAX_H3_ADALN_CACHE_GENERATOR_VERSION",
-    "MiniMaxH3AdaLNCache",
     "MINIMAX_H3_FP32_BUFFER_NAMES",
     "MINIMAX_H3_FP32_PARAM_NAMES",
     "MiniMaxH3DiT",

@@ -67,41 +67,6 @@ python examples/minimax_h3/minimax_h3_fl2va_h100.py \
 For compatibility, omitting `--mode` infers T2VA, first-frame, last-frame, or first-last from `--image` and
 `--last-image`. Explicit modes are preferable in reproducible commands.
 
-## Feature Cache
-
-MiniMax H3 uses AdaTaylorCache around the complete joint audio-video DiT block stack. Calibrate once on one H100
-with the same step count and scheduler shifts used for inference:
-
-```bash
-python examples/minimax_h3/minimax_h3_cache_calibrate.py \
-  --steps 50 \
-  --duration 4
-```
-
-The default output is
-`telefuser/feature_cache/ada_taylor_cache/params/MiniMax-H3-Base.json`, the location selected by the existing
-`FeatureCacheConfig` loader. Calibration runs full compute and derives its skip decisions from audio-token residuals;
-video tokens otherwise dominate the joint sequence and can hide audio error. A 50-point H3 sigma schedule performs
-49 DiT calls, so the generated file records `num_inference_steps: 49`. Calibration JSON files are local ignored
-artifacts and are not bundled with the repository.
-
-After calibration, enable the cache on the FL2VA example:
-
-```bash
-python examples/minimax_h3/minimax_h3_fl2va_h100.py \
-  --mode t2va \
-  --gpu-num 4 \
-  --steps 50 \
-  --duration 4 \
-  --enable-feature-cache \
-  --output outputs/minimax_h3_t2va_cached.mp4
-```
-
-The calibrated defaults use first-order Taylor approximation, at most two consecutive skips, 20% initial-step
-retention, and a `0.03` schedule threshold. See the unified warm benchmark in
-[Measured Four-GPU Profile](#measured-four-gpu-profile). Recalibrate when step count, scheduler shifts, checkpoint,
-or target workload changes.
-
 ## Ref2VA
 
 With no material arguments, the simple Ref2VA script uses the bundled reference video followed by the bundled voice
@@ -126,20 +91,7 @@ python examples/minimax_h3/minimax_h3_ref2va_h100.py \
   --output outputs/minimax_h3_ref2va_custom.mp4
 ```
 
-For an explicit mixed-media order, repeat `--material TYPE=URI`. Its order is passed through unchanged; it cannot be
-combined with the grouped flags:
-
-```bash
-python examples/minimax_h3/minimax_h3_ref2va_h100.py \
-  --material video=https://example.com/motion.mp4 \
-  --material image=/path/to/subject.png \
-  --material audio=/path/to/voice.wav \
-  --prompt "Use <Video 1>, preserve <Image 2>, and speak with <Audio 3>." \
-  --duration 5 \
-  --output outputs/minimax_h3_ref2va_ordered.mp4
-```
-
-The legacy convenience flags still group repeated arguments as images, videos, then audio. Use `--material TYPE=URI` or the JSON request runner whenever
+The convenience CLI groups repeated arguments as images, videos, then audio. Use the JSON request runner whenever
 heterogeneous ordering is semantic. It defaults to `examples/data/minimax-h3/ref2va.json`; relative material URIs
 are resolved from the request file's directory.
 
@@ -179,42 +131,6 @@ Ref2VA may omit `target.duration_seconds` when exactly one audio-bearing conditi
 multiple audio-bearing conditions, duration must be explicit. Published limits are enforced before model execution:
 at most 9 images, 3 videos, 3 audio-bearing inputs, and 12 files total; each audio/video clip must be 2-15 seconds,
 total video and total audio duration must each be at most 15 seconds, and audio requires an image or video reference.
-
-## Inference-Only AdaLN Cache
-
-The FL2VA and Ref2VA H100 examples enable online AdaLN caching by default. The first complete request computes AdaLN
-normally; after successful denoising, the model releases the AdaLN and timestep-projection weights and later requests
-reuse the in-memory cache. A later request with a different schedule requires a fresh pipeline or the full-weight path.
-
-```bash
-python examples/minimax_h3/minimax_h3_ref2va_h100.py \
-  --material video=/path/to/motion.mp4 \
-  --material audio=/path/to/voice.wav \
-  --output outputs/minimax_h3_ref2va_online_adaln.mp4
-```
-
-The generic JSON request runner retains an explicit online-adaln-cache switch for callers that use that entrypoint.
-FSDP remains unsupported for cache mode; single-GPU, Ulysses, and DiT TP are supported. Online TP collection gathers
-each step modulation output across TP ranks before releasing the projection weights.
-
-### Memory Accounting
-
-Cache mode reduces persistent DiT weight allocation after the first successful online request. The following values are
-calculated from the released H3 configuration, not sampled end-to-end peak-memory measurements. They use the standard
-50-step video and audio schedules: the two schedules contain 99 unique timesteps, and each cached timestep stores all
-50 block projections plus the final projection in BF16.
-
-| Topology | Released AdaLN and timestep weights per rank | Device-resident cache per rank | Net persistent-weight reduction per rank |
-|---|---:|---:|---:|
-| Single GPU or Ulysses | 24.35 GiB | 0.89 GiB | 23.45 GiB |
-| DiT TP2 | 12.20 GiB | 0.89 GiB | 11.31 GiB |
-| DiT TP4 | 6.13 GiB | 0.89 GiB | 5.24 GiB |
-
-The calculation excludes activations, the text encoder, both VAEs, communication buffers, and PyTorch allocator
-reservation. Therefore, it describes the steady-state capacity returned by AdaLN removal rather than a universal
-end-to-end peak reduction. During online collection, the first request keeps the full weights; the reduction applies
-only after that request finalizes successfully. NVIDIA SMI can retain cached allocator pages until PyTorch releases
-them, so use allocated memory and a steady cached request when validating this accounting on a deployment.
 
 ## Standard Python And Serve Entrypoints
 
@@ -273,9 +189,8 @@ entrypoint for request files and resolves relative material paths beside the JSO
 ## Generation And Parallel Options
 
 The simple CLIs expose `--steps`, `--seed`, `--duration`, `--aspect-ratio`, `--flow-shift`, and
-`--audio-flow-shift`. The FL2VA CLI additionally exposes the existing feature-cache initialization controls.
-Supported explicit aspect ratios are `21:9`, `16:9`, `4:3`, `1:1`, `3:4`, and `9:16`; `auto` follows the task
-policy or first FL2VA keyframe.
+`--audio-flow-shift`. Supported explicit aspect ratios are `21:9`, `16:9`, `4:3`, `1:1`, `3:4`, and `9:16`;
+`auto` follows the task policy or first FL2VA keyframe.
 
 `--gpu-num` selects the total worker count. `--ulysses-degree` remains a compatibility alias for the same CLI option;
 it no longer means that every selected GPU is necessarily an Ulysses rank.
@@ -290,10 +205,72 @@ The Ulysses degree must divide 56 attention heads. Scripts must run from their g
 processes can spawn safely. H100 examples request packed FlashAttention 4 and fall back to packed PyTorch SDPA when
 FlashAttention 4 is unavailable.
 
+## Online DiT Quantization
+
+MiniMax H3 supports two single-GPU online quantization backends for the DiT transformer Linear layers:
+
+| CLI value | Backend | Weight/activation path |
+|---|---|---|
+| torchao-fp8 | TorchAO | FP8 dynamic activation and FP8 weight when supported, otherwise TorchAO's FP8 weight-only path |
+| bnb-nf4 | bitsandbytes | NF4 weight-only with BF16 compute |
+
+Both paths convert the 258 Linear layers in the main and token-refiner transformer blocks. The FP32 video/audio
+patch projections, timestep embedding, output projections, text encoder, and VAEs retain their reference dtypes.
+The BF16 DiT is loaded from the original shards, moved to CUDA after text encoding, quantized on first denoising use,
+and then kept resident for the pipeline lifetime. This ordering avoids a simultaneous BF16 text encoder and DiT on
+one GPU and avoids unsupported CPU transfers of quantized tensor subclasses.
+TorchAO conversion has a transient memory peak near the BF16 footprint; use the full 80 GB device without colocated workloads.
+
+Use the dedicated TorchAO FP8 example:
+
+~~~bash
+python examples/minimax_h3/minimax_h3_fl2va_torchao_fp8_h100.py \
+  --mode t2va \
+  --duration 5 \
+  --output outputs/minimax_h3_torchao_fp8.mp4
+~~~
+
+Or the dedicated bitsandbytes NF4 example:
+
+~~~bash
+python examples/minimax_h3/minimax_h3_fl2va_bnb_nf4_h100.py \
+  --mode t2va \
+  --duration 5 \
+  --output outputs/minimax_h3_bnb_nf4.mp4
+~~~
+
+The standard FL2VA, Ref2VA, and JSON request CLIs also accept
+--quantization with either torchao-fp8 or bnb-nf4. The Python loader accepts the same names:
+
+~~~python
+from telefuser.pipelines.minimax_h3.example_utils import load_minimax_h3_pipeline
+
+pipeline = load_minimax_h3_pipeline(
+    "/path/to/MiniMaxAI_MiniMax-H3",
+    partition="FL2VA",
+    quantization="torchao-fp8",
+)
+~~~
+
+Online quantization currently requires ulysses_degree=1, tp_degree=1, and FSDP disabled. Quantizing before TP/FSDP
+would invalidate those wrappers' BF16 parameter-sharding contract, so unsupported combinations fail before checkpoint
+loading.
+
+For matched BF16/FP8/NF4 profiling, use the validation benchmark. It writes the synchronized MP4 plus a JSON report
+containing load time, end-to-end generation time, stage timings, and denoising allocator peaks:
+
+~~~bash
+python tools/validation/benchmark_minimax_h3_quantization.py \
+  --backend torchao-fp8 \
+  --duration 5 \
+  --steps 50 \
+  --output outputs/minimax_h3_torchao_fp8_50step.mp4
+~~~
+
 For multi-GPU resident profiles, `WorkerTensorChannel` transports text conditioning, visual condition rows, and the
 final video latent directly between worker groups. CUDA intermediates therefore do not stage through the parent
-process or CPU. The pipeline reports media, text, condition VAE, denoising, video/audio decode, allocator peak, DiT
-communication, and computed/skipped feature-cache steps in `MiniMaxH3Generation.runtime_metrics`.
+process or CPU. The pipeline reports media, text, condition VAE, denoising, video/audio decode, allocator peak, and
+DiT communication timings in `MiniMaxH3Generation.runtime_metrics`.
 
 H3 also uses eager BF16 Triton paths for Q/K RMSNorm plus partial NeoX RoPE, indexed modulation, SwiGLU, and Ulysses
 relayout when their input contracts match. Compatible `tf-kernel` builds may accelerate public RMSNorm, SwiGLU, and
@@ -313,10 +290,10 @@ The standard four-GPU profile already uses Ulysses2 x TP2 and therefore leaves F
 `load_minimax_h3_pipeline` directly to construct another supported combination; the product of Ulysses and TP degrees
 must be 1, 2, or 4.
 
-Ring attention, CFG parallelism, pipeline parallelism, sparse attention, quantization, and `torch.compile` are not
-enabled for H3. Video-VAE parallelism is spatial tiling over the existing TP process group, not parameter tensor
-parallelism. The dedicated service manifests expose the pipeline without adding framework-level configuration fields
-or changing the shared request schema.
+Ring attention, CFG parallelism, pipeline parallelism, sparse attention, and `torch.compile` are not enabled for H3.
+Video-VAE parallelism is spatial tiling over the existing TP process group, not parameter tensor parallelism. The
+dedicated service manifests expose the pipeline without adding framework-level configuration fields or changing the
+shared request schema.
 
 ## Four-GPU Regression
 
@@ -347,20 +324,11 @@ python examples/run_examples.py \
 
 ## Measured Four-GPU Profile
 
-The comparison below uses the frozen 768p, five-second, 50-point T2VA request with seed 0 and the resident
-Ulysses2 x TP2 four-H100 profile. Each configuration starts a fresh pipeline, runs one unmeasured warmup request,
-then measures the second request. Pipeline time includes text encoding, DiT, video/audio decode, host
-materialization, and orchestration; it excludes model/worker initialization and MP4 encoding. Wall time surrounds
-the same `run()` call. Full-device memory is sampled from `nvidia-smi` every 100 ms during the measured request.
+On the frozen 768p, five-second, 50-step T2VA request, after one warmup, the resident four-H100 profile measured
+79.34 seconds wall time. The matched local SGLang SP2+TP2 run measured 79.37 seconds. Sampled peak GPU 0 memory was
+62.7 GiB for TeleFuser and 67.8 GiB for SGLang. The TeleFuser DiT denoising phase took 76.41 seconds, including
+4.12 seconds recorded in SP/TP communication.
 
-| Feature cache | Computed / skipped DiT calls | Pipeline time | Wall time | DiT time | Pipeline speedup | Peak memory GPU 0 / 1 / 2 / 3 |
-|---|---:|---:|---:|---:|---:|---:|
-| Disabled | 49 / 0 | 77.93 s | 78.28 s | 75.26 s | 1.00x | 62.35 / 61.10 / 61.10 / 61.10 GiB |
-| AdaTaylorCache | 26 / 23 | 42.64 s | 42.95 s | 40.07 s | 1.83x | 63.63 / 62.42 / 62.43 / 62.43 GiB |
-
-AdaTaylorCache reduces steady-state pipeline latency by 45.3% and increases maximum single-GPU occupancy by
-1.28 GiB (2.0%). Against the matched uncached MP4, PSNR is 26.91, SSIM is 0.8619, audio cosine similarity is
-0.9562, and audio duration is unchanged. The earlier matched local SGLang SP2+TP2 parity run measured 79.37 seconds
-and 67.8 GiB on GPU 0 under the same request shape.
-
-These numbers describe this request and environment, not a general performance or quality guarantee.
+These numbers establish parity for this request and environment, not a general performance guarantee. Direct stage
+tensor transport removes CPU/parent staging but does not materially change the 50-step wall time because DiT compute
+and per-layer TP/SP collectives dominate.

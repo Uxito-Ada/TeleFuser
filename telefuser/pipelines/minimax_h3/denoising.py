@@ -125,6 +125,20 @@ class MiniMaxH3DenoisingStage(BaseStage):
         self.model_names = ["transformer"]
         self._request_serial = 0
 
+    def _ensure_online_quantized(self) -> None:
+        quant_config = self.model_runtime_config.quant_config
+        if not quant_config.enabled:
+            return
+        if self.transformer.quant_type == quant_config.quant_type:
+            return
+        if self.transformer.quant_type is not None:
+            raise RuntimeError(
+                f"MiniMax H3 DiT is already quantized as {self.transformer.quant_type}, "
+                f"cannot apply {quant_config.quant_type}"
+            )
+        self.transformer.enable_quant(quant_config)
+        current_platform.empty_cache()
+
     def parallel_models(self) -> None:
         parallel_config = self.model_runtime_config.parallel_config
         unsupported = {
@@ -222,6 +236,7 @@ class MiniMaxH3DenoisingStage(BaseStage):
         num_inference_steps: int,
         _transport_video: bool = False,
     ) -> MiniMaxH3DenoiseResult:
+        self._ensure_online_quantized()
         if isinstance(text, dict):
             text = MiniMaxH3TextCondition(**text)
         conditions = [
@@ -339,14 +354,6 @@ class MiniMaxH3DenoisingStage(BaseStage):
         audio_shift = plan.audio_flow_shift or plan.default_audio_flow_shift
         video_sigmas = minimax_h3_time_shift_sigmas(num_steps=num_inference_steps, shift_scale=video_shift)
         audio_sigmas = minimax_h3_time_shift_sigmas(num_steps=num_inference_steps, shift_scale=audio_shift)
-        denoising_steps = len(video_sigmas) - 1
-        if len(audio_sigmas) - 1 != denoising_steps:
-            raise ValueError("MiniMax H3 video and audio schedules must have the same number of denoising steps")
-        self.setup_feature_cache(
-            self.transformer,
-            self.model_runtime_config.feature_cache_config,
-            denoising_steps,
-        )
         img_pos_cpu = packed["img_pos"]
         audio_pos_cpu = packed["audio_pos"]
         img_pos = img_pos_cpu.to(device)
@@ -542,14 +549,6 @@ class MiniMaxH3DenoisingStage(BaseStage):
             "peak_reserved_bytes": peak_reserved,
             "communication_seconds": communication_seconds,
         }
-        feature_cache = getattr(self.transformer, "feature_cache", None)
-        get_compute_steps = getattr(feature_cache, "get_compute_steps", None)
-        computed_steps = len(get_compute_steps()) if callable(get_compute_steps) else denoising_steps
-        runtime_metrics["feature_cache_computed_steps"] = computed_steps
-        runtime_metrics["feature_cache_skipped_steps"] = denoising_steps - computed_steps
-        finalize_online_adaln_cache = getattr(self.transformer, "finalize_online_adaln_cache", None)
-        if callable(finalize_online_adaln_cache):
-            finalize_online_adaln_cache()
         return MiniMaxH3DenoiseResult(video_latent, audio_latent, packed, runtime_metrics)
 
     def denoise_for_video_vae(
