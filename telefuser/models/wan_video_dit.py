@@ -10,7 +10,15 @@ from einops import rearrange
 from torch.distributed.device_mesh import DeviceMesh
 
 from telefuser.core.base_model import BaseModel
-from telefuser.core.config import AttentionConfig, AttnImplType, OffloadConfig, SparseAttentionConfig
+from telefuser.core.config import (
+    AttentionConfig,
+    AttnImplType,
+    OffloadConfig,
+    QuantConfig,
+    QuantKernelBackend,
+    QuantType,
+    SparseAttentionConfig,
+)
 from telefuser.distributed.device_mesh import (
     get_pp_group,
     get_pp_rank,
@@ -439,8 +447,6 @@ class WanModel(BaseModel):
 
     def enable_quant(self, quant_type: str | torch.dtype):
         """Enable quantization for transformer blocks."""
-        from telefuser.core.config import QuantConfig, QuantType
-
         if isinstance(quant_type, QuantConfig):
             if quant_type.quant_type == QuantType.BNB_NF4:
                 logger.info("loading weights with BNB NF4, start quantize linear layers")
@@ -468,6 +474,36 @@ class WanModel(BaseModel):
                 )
                 self.torchao_fp8_replaced_linear = replaced
                 logger.info(f"TorchAO FP8 converted {replaced} Linear layers")
+                self.quant_type = quant_type.quant_type
+                return
+            if quant_type.quant_type == QuantType.FP8:
+                if quant_type.kernel_backend not in (QuantKernelBackend.AUTO, QuantKernelBackend.TF_KERNEL):
+                    raise ValueError(
+                        "Wan FP8 online quantization requires the tf-kernel backend; "
+                        f"got {quant_type.kernel_backend.name}"
+                    )
+                from telefuser.ops.fp8_gemm import FP8GemmOptions, count_linear_layers, enable_fp8_gemm
+
+                include_names = quant_type.quantize_modules or ("blocks.",)
+
+                def module_filter(name: str, _module: nn.Module) -> bool:
+                    return any(token in name for token in include_names) and not any(
+                        token and token in name for token in quant_type.skip_modules
+                    )
+
+                replaced = count_linear_layers(self, module_filter=module_filter)
+                enable_fp8_gemm(
+                    self,
+                    options=FP8GemmOptions(
+                        cast_output_back=False,
+                        fp16_weight_storage="keep" if quant_type.keep_fp16_weight else "discard",
+                        materialize_fp8_on_wrap=True,
+                    ),
+                    module_filter=module_filter,
+                )
+                if replaced == 0:
+                    raise RuntimeError("Wan FP8 online quantization did not select any Linear layers")
+                self.tf_kernel_fp8_replaced_linear = replaced
                 self.quant_type = quant_type.quant_type
                 return
             quant_type = torch.float8_e4m3fn if quant_type.quant_type == QuantType.FP8 else quant_type.quant_type

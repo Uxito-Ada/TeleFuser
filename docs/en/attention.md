@@ -202,6 +202,30 @@ shapes and head dimension 128. Unsupported calls, dense warmup layers or timeste
 and kernel runtime failures fall back to the existing dense attention path. Ring/USP
 also remains dense because its online merge requires log-sum-exp output.
 
+### Wan2.1 SageAttention and FP8 composition
+
+Wan2.1 can independently select SageAttention v2 and DiT Linear quantization:
+
+```python
+from telefuser.core.config import AttentionConfig, AttnImplType, QuantConfig, QuantKernelBackend, QuantType
+
+pipe_config.dit_config.attention_config = AttentionConfig.dense_attention(
+    AttnImplType.SAGE_ATTN_2_8_8_SM90,
+)
+pipe_config.dit_config.quant_config = QuantConfig(
+    enabled=True,
+    quant_type=QuantType.TORCHAO_FP8,
+    kernel_backend=QuantKernelBackend.TORCHAO,
+)
+```
+
+This composition is layer-disjoint: FP8 replaces selected DiT `Linear` layers, and
+SageAttention receives the resulting BF16 Q/K/V tensors and performs its own low-precision
+attention computation. The tf-kernel variant uses `QuantType.FP8` with
+`QuantKernelBackend.TF_KERNEL`. It does not quantize the T5 encoder, VAE, cross-attention,
+or Wan output head. SageAttention and Sol-Attn are alternative attention implementations;
+they cannot both execute the same attention call.
+
 ### QwenImagePipeline / ZImagePipeline
 
 Supports only dense attention (image generation doesn't have temporal dimension):

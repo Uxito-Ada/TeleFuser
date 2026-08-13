@@ -201,6 +201,28 @@ Sol-Attn 仅用于连续、非因果、BF16、Q/K/V 形状相同且 head dimensi
 self-attention。其他调用、dense 预热层/时间步以及内核运行失败都会回退到现有密集路径。
 Ring/USP 需要 LSE 做在线合并，因此仍使用支持 LSE 的密集后端。
 
+### Wan2.1 SageAttention 与 FP8 组合
+
+Wan2.1 可以独立选择 SageAttention v2 和 DiT Linear 量化：
+
+```python
+from telefuser.core.config import AttentionConfig, AttnImplType, QuantConfig, QuantKernelBackend, QuantType
+
+pipe_config.dit_config.attention_config = AttentionConfig.dense_attention(
+    AttnImplType.SAGE_ATTN_2_8_8_SM90,
+)
+pipe_config.dit_config.quant_config = QuantConfig(
+    enabled=True,
+    quant_type=QuantType.TORCHAO_FP8,
+    kernel_backend=QuantKernelBackend.TORCHAO,
+)
+```
+
+两者作用在不同层：FP8 替换选定的 DiT `Linear` 层，输出 BF16 的 Q/K/V 再交给 SageAttention，
+由 SageAttention 自己执行低精度 attention 计算。tf-kernel 版本使用 `QuantType.FP8` 和
+`QuantKernelBackend.TF_KERNEL`。T5 编码器、VAE、cross-attention 和 Wan 输出 head 不会被量化。
+SageAttention 与 Sol-Attn 是两种互斥的 attention 实现，不能同时处理同一次 attention 调用。
+
 ### QwenImagePipeline / ZImagePipeline
 
 仅支持密集注意力（图像生成没有时序维度）：

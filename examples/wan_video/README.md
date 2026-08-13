@@ -89,6 +89,35 @@ python examples/wan_video/wan21_1_3b_text_to_video_h100.py --resolution 480p --a
 **Features:**
 - Video Frame Interpolation (VFI) with RIFE model for 30fps output
 - CFG parallel when cfg_scale > 1
+- Optional dense attention backend: PyTorch SDPA or SageAttention v2 on H100
+- Optional DiT Linear quantization: tf-kernel FP8 or TorchAO FP8
+
+**Attention and quantization options:**
+
+```bash
+# BF16 baseline with PyTorch SDPA
+python examples/wan_video/wan21_1_3b_text_to_video_h100.py \
+  --attention dense --quantization none
+
+# BF16 Wan with H100 SageAttention v2
+python examples/wan_video/wan21_1_3b_text_to_video_h100.py \
+  --attention sage --quantization none
+
+# tf-kernel FP8 Linear layers plus SageAttention
+python examples/wan_video/wan21_1_3b_text_to_video_h100.py \
+  --attention sage --quantization tf-kernel-fp8
+
+# TorchAO FP8 Linear layers plus SageAttention
+python examples/wan_video/wan21_1_3b_text_to_video_h100.py \
+  --attention sage --quantization torchao-fp8
+```
+
+`--attention sage` selects `SAGE_ATTN_2_8_8_SM90` for dense Wan self-attention. SageAttention
+does its own low-precision QK/PV computation; it is independent of FP8 quantization of the
+DiT Linear layers. The T5 encoder, VAE, cross-attention, and output head remain in BF16.
+The `tf-kernel-fp8` option requires a compatible local tf-kernel build, while
+`torchao-fp8` requires TorchAO. The options are mutually composable, so use the same
+script to benchmark all four attention/quantization combinations.
 
 #### wan21_1_3b_text_to_video_hf.py
 

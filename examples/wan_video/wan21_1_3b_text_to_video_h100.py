@@ -4,7 +4,7 @@ import time
 import click
 import torch
 
-from telefuser.core.config import AttentionConfig, AttnImplType
+from telefuser.core.config import AttentionConfig, AttnImplType, QuantConfig, QuantKernelBackend, QuantType
 from telefuser.core.module_manager import ModuleManager
 from telefuser.pipelines.wan_video.wan21_video import (
     Wan21VideoPipeline,
@@ -34,12 +34,40 @@ PPL_CONFIG = dict(
 )
 
 
-def get_pipeline(parallelism=1, model_root=PPL_CONFIG["model_root"]):
+def _make_attention_config(attention: str) -> AttentionConfig:
+    """Resolve the dense attention backend selected by the example CLI."""
+    if attention == "dense":
+        return AttentionConfig.dense_attention(AttnImplType.TORCH_SDPA)
+    if attention == "sage":
+        return AttentionConfig.dense_attention(AttnImplType.SAGE_ATTN_2_8_8_SM90)
+    raise ValueError(f"Unsupported attention backend: {attention}")
+
+
+def _make_quant_config(quantization: str) -> QuantConfig:
+    """Resolve the optional DiT Linear quantization backend."""
+    if quantization == "none":
+        return QuantConfig()
+    if quantization == "tf-kernel-fp8":
+        return QuantConfig(enabled=True, quant_type=QuantType.FP8, kernel_backend=QuantKernelBackend.TF_KERNEL)
+    if quantization == "torchao-fp8":
+        return QuantConfig(enabled=True, quant_type=QuantType.TORCHAO_FP8, kernel_backend=QuantKernelBackend.TORCHAO)
+    raise ValueError(f"Unsupported quantization backend: {quantization}")
+
+
+def get_pipeline(
+    parallelism=1,
+    model_root=PPL_CONFIG["model_root"],
+    attention="dense",
+    quantization="none",
+):
     """
     Args:
         parallelism (int): Number of parallel GPUs for inference (REQUIRED)
         model_root (str): Root directory of the model files (REQUIRED)
     """
+    attention_config = _make_attention_config(attention)
+    quant_config = _make_quant_config(quantization)
+
     # Load models
     module_manager = ModuleManager(device="cpu")
     module_manager.load_models(
@@ -49,6 +77,7 @@ def get_pipeline(parallelism=1, model_root=PPL_CONFIG["model_root"]):
     module_manager.load_models(
         [[f"{model_root}/diffusion_pytorch_model.safetensors"]],
         torch_dtype=torch.bfloat16,  # You can set `torch_dtype=torch.bfloat16` to disable FP8 quantization.
+        quant_config=quant_config,
     )
     module_manager.load_models(
         [
@@ -64,7 +93,8 @@ def get_pipeline(parallelism=1, model_root=PPL_CONFIG["model_root"]):
         )
     pipe = Wan21VideoPipeline(device="cuda", torch_dtype=torch.bfloat16)
     pipe_config = Wan21VideoPipelineConfig()
-    pipe_config.dit_config.attention_config = AttentionConfig.dense_attention(PPL_CONFIG["attn_impl"])
+    pipe_config.dit_config.attention_config = attention_config
+    pipe_config.dit_config.quant_config = quant_config
     pipe_config.sample_solver = PPL_CONFIG["sample_solver"]
     pipe_config.enable_clip_stage = True
     pipe_config.enable_vfi = PPL_CONFIG["enable_vfi"]
@@ -171,6 +201,20 @@ def run_with_file(
 @click.option("--resolution", default=PPL_CONFIG["resolution"], help="Resolution (480p, 720p)")
 @click.option("--aspect_ratio", default="16:9", help="Aspect ratio")
 @click.option("--model_root", default=PPL_CONFIG["model_root"], help="Root directory of the model files")
+@click.option(
+    "--attention",
+    default="dense",
+    type=click.Choice(["dense", "sage"]),
+    show_default=True,
+    help="Dense attention backend: PyTorch SDPA or SageAttention v2.",
+)
+@click.option(
+    "--quantization",
+    default="none",
+    type=click.Choice(["none", "tf-kernel-fp8", "torchao-fp8"]),
+    show_default=True,
+    help="Optional FP8 quantization for Wan DiT Linear layers.",
+)
 def main(
     gpu_num,
     prompt,
@@ -179,9 +223,11 @@ def main(
     resolution,
     aspect_ratio,
     model_root,
+    attention,
+    quantization,
 ):
     """Text to video conversion using Wan2.1 1.3B model"""
-    pipe = get_pipeline(gpu_num, model_root)
+    pipe = get_pipeline(gpu_num, model_root, attention, quantization)
 
     video = run(
         pipe,

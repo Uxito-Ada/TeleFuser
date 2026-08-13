@@ -3,9 +3,48 @@ from unittest.mock import patch
 import pytest
 import torch
 
-from telefuser.core.config import AttentionConfig, AttnImplType, SparseAttentionConfig
+from telefuser.core.config import (
+    AttentionConfig,
+    AttnImplType,
+    QuantConfig,
+    QuantKernelBackend,
+    QuantType,
+    SparseAttentionConfig,
+)
 from telefuser.models.wan_video_dit import SelfAttention, WanModel, precompute_freqs_cis_3d
 from telefuser.ops.attention import SparseAttentionState, attention_impl
+
+
+def test_wan_tf_kernel_fp8_quantization_uses_filtered_linear_wrapper(monkeypatch: pytest.MonkeyPatch) -> None:
+    model = WanModel.__new__(WanModel)
+    torch.nn.Module.__init__(model)
+    model.blocks = torch.nn.ModuleList()
+    calls: list[tuple[str, object]] = []
+
+    def fake_count(module: torch.nn.Module, **kwargs: object) -> int:
+        calls.append(("count", kwargs["module_filter"]))
+        return 12
+
+    def fake_enable(module: torch.nn.Module, **kwargs: object) -> None:
+        calls.append(("enable", kwargs))
+
+    monkeypatch.setattr("telefuser.ops.fp8_gemm.count_linear_layers", fake_count)
+    monkeypatch.setattr("telefuser.ops.fp8_gemm.enable_fp8_gemm", fake_enable)
+
+    model.enable_quant(
+        QuantConfig(
+            enabled=True,
+            quant_type=QuantType.FP8,
+            kernel_backend=QuantKernelBackend.TF_KERNEL,
+        )
+    )
+
+    assert calls[0][0] == "count"
+    assert calls[1][0] == "enable"
+    options = calls[1][1]["options"]
+    assert options.fp16_weight_storage == "discard"
+    assert model.tf_kernel_fp8_replaced_linear == 12
+    assert model.quant_type is QuantType.FP8
 
 
 def test_wan_model_enables_sol_attention_state() -> None:

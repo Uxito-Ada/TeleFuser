@@ -403,8 +403,9 @@ class QuantConfig:
     """Configuration for model quantization during loading.
 
     .. warning::
-        Supported values depend on the model. Wan, Qwen-Image, and LTX currently
-        implement ``TORCHAO_FP8`` and ``BNB_NF4`` for transformer Linear layers.
+        Supported values depend on the model. Wan currently implements
+        ``FP8`` (tf-kernel), ``TORCHAO_FP8``, and ``BNB_NF4`` for transformer
+        Linear layers.
 
     Attributes:
         enabled: Whether to enable online quantization.
