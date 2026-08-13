@@ -90,6 +90,7 @@ python examples/wan_video/wan21_1_3b_text_to_video_h100.py --resolution 480p --a
 - Video Frame Interpolation (VFI) with RIFE model for 30fps output
 - CFG parallel when cfg_scale > 1
 - Optional dense attention backend: PyTorch SDPA or SageAttention v2 on H100
+- Optional Sol-Attn sparse attention, including an FP8 QKV/SOL path
 - Optional DiT Linear quantization: tf-kernel FP8 or TorchAO FP8
 
 **Attention and quantization options:**
@@ -110,14 +111,33 @@ python examples/wan_video/wan21_1_3b_text_to_video_h100.py \
 # TorchAO FP8 Linear layers plus SageAttention
 python examples/wan_video/wan21_1_3b_text_to_video_h100.py \
   --attention sage --quantization torchao-fp8
+
+# BF16 QKV and Sol-Attn sparse attention
+python examples/wan_video/wan21_1_3b_text_to_video_h100.py \
+  --attention sol --quantization none
+
+# FP8 Linear -> BF16 norm/RoPE -> FP8 QKV -> FP8 Sol-Attn
+python examples/wan_video/wan21_1_3b_text_to_video_h100.py \
+  --attention sol-fp8 --quantization tf-kernel-fp8
+
+# The same FP8 SOL path with TorchAO Linear quantization
+python examples/wan_video/wan21_1_3b_text_to_video_h100.py \
+  --attention sol-fp8 --quantization torchao-fp8
 ```
 
-`--attention sage` selects `SAGE_ATTN_2_8_8_SM90` for dense Wan self-attention. SageAttention
+`--attention sage` selects `SAGE_ATTN_2_8_8_SM90` for dense Wan self-attention. `--attention sol`
+selects the dynamic sparse Sol-Attn kernel with BF16 Q/K/V. `--attention sol-fp8` quantizes
+the post-RoPE Q/K/V activations per 64-token block and runs the exact QK and PV GEMMs in
+FP8 with FP32 accumulation; routing summaries and normalization remain BF16/FP32. The first
+warm-up timesteps/layers retain dense attention according to the Sol-Attn configuration.
+SageAttention
 does its own low-precision QK/PV computation; it is independent of FP8 quantization of the
 DiT Linear layers. The T5 encoder, VAE, cross-attention, and output head remain in BF16.
 The `tf-kernel-fp8` option requires a compatible local tf-kernel build, while
 `torchao-fp8` requires TorchAO. The options are mutually composable, so use the same
-script to benchmark all four attention/quantization combinations.
+script to benchmark dense, Sage, Sol, and FP8 Sol with either Linear quantizer. FP8 Sol currently
+uses the Triton implementation and `kv_splits=1`; it is selected automatically only after Sol's
+dense warm-up guards have cleared.
 
 #### wan21_1_3b_text_to_video_hf.py
 

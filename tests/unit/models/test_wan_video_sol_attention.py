@@ -13,6 +13,41 @@ from telefuser.core.config import (
 )
 from telefuser.models.wan_video_dit import SelfAttention, WanModel, precompute_freqs_cis_3d
 from telefuser.ops.attention import SparseAttentionState, attention_impl
+from telefuser.ops.fp8_attention import (
+    dequantize_fp8_per_token,
+    quantize_fp8_per_block,
+    quantize_fp8_per_token,
+)
+
+
+def test_fp8_attention_quantization_round_trip() -> None:
+    torch.manual_seed(0)
+    value = torch.randn(1, 8, 2, 128, dtype=torch.bfloat16)
+    quantized, scale = quantize_fp8_per_token(value)
+    restored = dequantize_fp8_per_token(quantized, scale, torch.bfloat16)
+
+    assert quantized.dtype is torch.float8_e4m3fn
+    assert scale.shape == (1, 8, 2)
+    assert restored.dtype is torch.bfloat16
+    assert torch.isfinite(restored).all()
+    assert torch.mean((value.float() - restored.float()).abs()) < 0.03
+
+
+def test_fp8_attention_block_quantization_round_trip() -> None:
+    torch.manual_seed(0)
+    value = torch.randn(1, 65, 2, 128, dtype=torch.bfloat16)
+    quantized, scale = quantize_fp8_per_block(value)
+    restored = dequantize_fp8_per_token(
+        quantized,
+        scale.repeat_interleave(64, dim=1)[:, : value.shape[1]],
+        torch.bfloat16,
+    )
+
+    assert quantized.dtype is torch.float8_e4m3fn
+    assert scale.shape == (1, 2, 2)
+    assert restored.dtype is torch.bfloat16
+    assert torch.isfinite(restored).all()
+    assert torch.mean((value.float() - restored.float()).abs()) < 0.04
 
 
 def test_wan_tf_kernel_fp8_quantization_uses_filtered_linear_wrapper(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -136,6 +171,27 @@ def test_wan_self_attention_dispatches_sol_through_public_ops() -> None:
     assert captured["attention_config"].attn_impl is AttnImplType.SOL_ATTN
     assert captured["attention_config"].sparse_config is sparse_config
     assert captured["sparse_state"] is state
+
+
+def test_wan_self_attention_only_quantizes_qkv_after_sol_warmup(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = SelfAttention(dim=128, num_heads=1).to(torch.bfloat16)
+    sparse_config = SparseAttentionConfig(sparse_impl="sol", dense_timesteps=2, sol_fp8=True)
+    state = SparseAttentionState(sparse_config, mask_map=None)
+    captured: list[torch.dtype] = []
+
+    def fake_attention(q: torch.Tensor, k: torch.Tensor, v: torch.Tensor, **kwargs: object) -> torch.Tensor:
+        captured.append(q.dtype)
+        return q.to(torch.bfloat16)
+
+    monkeypatch.setattr("telefuser.models.wan_video_dit.attn_func", fake_attention)
+    x = torch.randn(1, 4, 128, dtype=torch.bfloat16)
+    freqs = torch.zeros(4, 64, dtype=torch.bfloat16)
+
+    module.default_forward(x, freqs, freqs, sparse_state=state)
+    state.update(numeral_timestep=2, layer_idx=1)
+    module.default_forward(x, freqs, freqs, sparse_state=state)
+
+    assert captured == [torch.bfloat16, torch.float8_e4m3fn]
 
 
 @pytest.mark.gpu

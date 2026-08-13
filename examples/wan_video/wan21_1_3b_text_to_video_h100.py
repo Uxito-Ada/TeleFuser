@@ -40,6 +40,8 @@ def _make_attention_config(attention: str) -> AttentionConfig:
         return AttentionConfig.dense_attention(AttnImplType.TORCH_SDPA)
     if attention == "sage":
         return AttentionConfig.dense_attention(AttnImplType.SAGE_ATTN_2_8_8_SM90)
+    if attention in ("sol", "sol-fp8"):
+        return AttentionConfig.sol_attention(sol_fp8=attention == "sol-fp8")
     raise ValueError(f"Unsupported attention backend: {attention}")
 
 
@@ -204,9 +206,9 @@ def run_with_file(
 @click.option(
     "--attention",
     default="dense",
-    type=click.Choice(["dense", "sage"]),
+    type=click.Choice(["dense", "sage", "sol", "sol-fp8"]),
     show_default=True,
-    help="Dense attention backend: PyTorch SDPA or SageAttention v2.",
+    help="Attention backend: SDPA, SageAttention v2, Sol-Attn, or FP8-input Sol-Attn.",
 )
 @click.option(
     "--quantization",
@@ -255,6 +257,7 @@ def main(
 
     # Save results
     output_dir = os.getenv("TELEAI_EXAMPLE_OUTPUT_DIR", "./")
+    os.makedirs(output_dir, exist_ok=True)
     filename = get_example_name(__file__).replace(".py", f"_{gpu_num}gpu.mp4")
     output_path = os.path.join(output_dir, filename)
 

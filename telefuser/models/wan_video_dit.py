@@ -45,6 +45,7 @@ from telefuser.offload import (
 from telefuser.offload.async_offload import AsyncOffloadManager
 from telefuser.ops.attention import MaskMap, SparseAttentionState
 from telefuser.ops.attention import attention as attn_func
+from telefuser.ops.fp8_attention import quantize_fp8_per_block
 from telefuser.ops.normalization import LayerNorm, RMSNorm, fused_scale_shift, modulate
 from telefuser.ops.rotary import apply_rotary_emb
 from telefuser.utils.logging import logger
@@ -201,6 +202,17 @@ class SelfAttention(nn.Module):
         q = rearrange(q, "b s (n d) -> b s n d", n=self.num_heads)
         k = rearrange(k, "b s (n d) -> b s n d", n=self.num_heads)
         v = rearrange(v, "b s (n d) -> b s n d", n=self.num_heads)
+        q_scale = k_scale = v_scale = None
+        sol_fp8_active = (
+            sparse_state is not None
+            and sparse_state.config.sparse_impl == "sol"
+            and sparse_state.config.sol_fp8
+            and not sparse_state.should_use_dense()
+        )
+        if sol_fp8_active:
+            q, q_scale = quantize_fp8_per_block(q)
+            k, k_scale = quantize_fp8_per_block(k)
+            v, v_scale = quantize_fp8_per_block(v)
         if sparse_state is not None and sparse_state.config.sparse_impl == "radial":
             seqlen = q.shape[2]
             q = rearrange(q, "b s n d -> (b s) n d", s=seqlen, n=self.num_heads)
@@ -214,6 +226,9 @@ class SelfAttention(nn.Module):
             sparse_state=sparse_state,
             input_layout="BSND",
             output_layout="BSND",
+            q_scale=q_scale,
+            k_scale=k_scale,
+            v_scale=v_scale,
         )
         x = rearrange(x, "b s n d -> b s (n d)", n=self.num_heads)
         return self.o(x)

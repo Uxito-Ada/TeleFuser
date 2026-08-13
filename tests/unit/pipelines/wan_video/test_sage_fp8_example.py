@@ -8,12 +8,21 @@ from telefuser.core.config import AttnImplType, QuantKernelBackend, QuantType
 
 @pytest.mark.parametrize(
     ("name", "expected"),
-    [("dense", AttnImplType.TORCH_SDPA), ("sage", AttnImplType.SAGE_ATTN_2_8_8_SM90)],
+    [
+        ("dense", AttnImplType.TORCH_SDPA),
+        ("sage", AttnImplType.SAGE_ATTN_2_8_8_SM90),
+        ("sol", AttnImplType.SOL_ATTN),
+        ("sol-fp8", AttnImplType.SOL_ATTN),
+    ],
 )
 def test_attention_name_resolves_to_dense_backend(name: str, expected: AttnImplType) -> None:
     config = example._make_attention_config(name)
     assert config.attn_impl is expected
-    assert config.sparse_config is None
+    if name == "dense" or name == "sage":
+        assert config.sparse_config is None
+    else:
+        assert config.sparse_config is not None
+        assert config.sparse_config.sol_fp8 is (name == "sol-fp8")
 
 
 @pytest.mark.parametrize(
